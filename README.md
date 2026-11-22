@@ -25,23 +25,27 @@ identifica al jugador: no la compartas; comparte solo el código.
 
 ## Reglas aplicadas
 
+- La partida termina cuando todos los tableros tienen ocupadas sus casillas
+  sin puerta, aunque queden puertas vacías.
 - Todos juegan una vez por turno; el siguiente comienza cuando todos han
-  actuado. Un jugador que ya haya completado su tablero espera, pero puede
-  seguir colocando calaveras en tableros ajenos.
+  actuado o pasado. Un jugador sin casillas libres del tipo de la tirada pasa,
+  pero puede seguir colocando calaveras en tableros ajenos.
 - La llave obliga a usar una puerta y prevalece sobre el corazón. El corazón
   permite escoger del 1 al 15 si no hay llave. La calavera prevalece sobre
   ambos y asigna aleatoriamente a cada jugador el tablero de otra persona,
   sin mostrar su identidad. Si el tablero asignado no tiene casillas normales
   libres, ese jugador pasa.
-- Si una tirada normal o con llave impediría jugar a algún jugador que no
-  haya terminado, se repite para todos. También se repite una tirada de
-  calavera si ya no quedan casillas normales libres en ningún tablero.
-- Cada casilla numérica que tenga al menos un número consecutivo adyacente
-  aporta un punto, independientemente de cuántas secuencias la incluyan.
-  La adyacencia incluye horizontal, vertical y diagonal.
+- Se repite una tirada normal o con llave si ningún jugador puede usarla.
+- Una secuencia es un camino de números adyacentes que aumenta de uno en
+  uno. Solo puntúa la secuencia más larga, con un punto por cada casilla;
+  una casilla aislada no puntúa. La adyacencia incluye horizontal, vertical
+  y diagonal. En los tableros finales se muestra en verde la secuencia
+  puntuable y en gris las demás conexiones entre números consecutivos.
 - Cada valor con al menos un grupo conectado de tres o más casillas iguales
   aporta tres puntos, una sola vez por valor. Cada calavera aporta dos puntos
   si tiene un 9 adyacente, y resta dos en caso contrario. Los empates se
-  anuncian como tales.
+  anuncian como tales. Los grupos se muestran con un color distinto para cada
+  número, las calaveras positivas con fondo verde y las negativas con una
+  cruz roja.
 
 Para ejecutar las pruebas: `python -m unittest test_MathGame1`.

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from MathGame1 import DOORS, POSITIONS, SKULL, Game, score
+from MathGame1 import DOORS, POSITIONS, SKULL, Game, analyze_board, score, score_overlay
 
 
 class GameTests(unittest.TestCase):
@@ -85,8 +85,50 @@ class GameTests(unittest.TestCase):
                 door = not skull and roll[0] == 6
                 pos = next(pos for pos in POSITIONS if (pos in DOORS) == door and target.board[pos] is None)
                 self.game.place(player.token, pos, None if skull else self.game.choices()[0], turn)
-        self.assertTrue(all(all(value is not None for value in p.board.values()) for p in self.game.players))
-        self.assertGreaterEqual(self.game.turn, 30)
+        self.assertTrue(all(all(p.board[pos] is not None for pos in POSITIONS if pos not in DOORS)
+                            for p in self.game.players))
+
+    def test_game_finishes_with_empty_doors(self):
+        self.game.state = 'playing'
+        for player in self.game.players:
+            for pos in POSITIONS:
+                if pos not in DOORS:
+                    player.board[pos] = 1
+        self.game.next_turn()
+        self.assertEqual(self.game.state, 'finished')
+        self.assertIsNone(self.game.roll)
+
+    def test_players_without_matching_cells_pass(self):
+        self.game.state = 'playing'
+        for pos in POSITIONS:
+            if pos not in DOORS:
+                self.first.board[pos] = 1
+            else:
+                self.second.board[pos] = 1
+        with patch('MathGame1.RNG.choice', side_effect=lambda rolls: (
+                self.assertIn((1, 1, 1), rolls) or (1, 1, 1))):
+            self.game.next_turn()
+        self.assertIn(self.first.token, self.game.submitted)
+        self.assertNotIn(self.second.token, self.game.submitted)
+        with patch('MathGame1.RNG.choice', return_value=(6, 1, 1)):
+            self.game.next_turn()
+        self.assertNotIn(self.first.token, self.game.submitted)
+        self.assertIn(self.second.token, self.game.submitted)
+
+    def test_last_normal_placement_finishes_game(self):
+        self.game.state = 'playing'
+        normal_positions = [pos for pos in POSITIONS if pos not in DOORS]
+        for player in self.game.players:
+            for pos in normal_positions:
+                player.board[pos] = 1
+        last = normal_positions[-1]
+        self.second.board[last] = None
+        with patch('MathGame1.RNG.choice', return_value=(1, 1, 1)):
+            self.game.next_turn()
+        self.assertIn(self.first.token, self.game.submitted)
+        self.game.place(self.second.token, last, 1, self.game.turn)
+        self.assertEqual(self.game.state, 'finished')
+        self.assertTrue(any(value is None for value in self.second.board.values()))
 
     def test_scoring(self):
         board = dict.fromkeys(POSITIONS)
@@ -95,6 +137,43 @@ class GameTests(unittest.TestCase):
                       (3, 4): 7, (3, 5): 7, (4, 5): 7,
                       (5, 0): SKULL, (5, 1): 9, (5, 5): SKULL})
         self.assertEqual(score(board), {'secuencias': 3, 'grupos': 3, 'calaveras': 0, 'total': 6})
+
+    def test_only_longest_increasing_sequence_scores(self):
+        board = dict.fromkeys(POSITIONS)
+        board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3, (2, 5): 4,
+                      (4, 0): 10, (5, 0): 11, (5, 5): 8})
+        analysis = analyze_board(board)
+        self.assertEqual(analysis.scores['secuencias'], 4)
+        self.assertEqual([board[pos] for pos in analysis.longest_sequence], [1, 2, 3, 4])
+        self.assertIn(((4, 0), (5, 0)), analysis.sequence_edges)
+
+    def test_scoring_annotations_match_groups_and_skulls(self):
+        board = dict.fromkeys(POSITIONS)
+        board.update({(2, 0): 7, (2, 1): 7, (3, 0): 7,
+                      (4, 4): 8, (4, 5): 8, (5, 5): 8,
+                      (0, 2): SKULL, (1, 1): 9, (5, 0): SKULL})
+        analysis = analyze_board(board)
+        self.assertEqual(analysis.scores['grupos'], 6)
+        self.assertEqual(analysis.group_cells, {(2, 0), (2, 1), (3, 0), (4, 4), (4, 5), (5, 5)})
+        self.assertEqual(analysis.positive_skulls, {(0, 2)})
+        self.assertEqual(analysis.negative_skulls, {(5, 0)})
+        overlay = score_overlay(analysis)
+        self.assertIn('stroke="#dc2626"', overlay)
+        self.assertEqual(overlay.count('<path '), 1)
+
+    def test_isolated_number_does_not_score_as_sequence(self):
+        board = dict.fromkeys(POSITIONS)
+        board[(0, 2)] = 1
+        analysis = analyze_board(board)
+        self.assertEqual(analysis.scores['secuencias'], 0)
+        self.assertEqual(analysis.longest_sequence, [])
+
+    def test_sequence_overlay_marks_scoring_and_other_connections(self):
+        board = dict.fromkeys(POSITIONS)
+        board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3, (4, 0): 10, (5, 0): 11})
+        overlay = score_overlay(analyze_board(board))
+        self.assertEqual(overlay.count('stroke="#15803d"'), 2)
+        self.assertEqual(overlay.count('stroke="#64748b"'), 1)
 
 
 if __name__ == '__main__':

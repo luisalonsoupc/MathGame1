@@ -40,37 +40,63 @@ def neighbors(position: Position) -> list[Position]:
     ]
 
 
-def score(board: dict[Position, Cell]) -> dict[str, int]:
-    """Cuenta cada casilla de una secuencia y cada valor repetido una sola vez."""
+@dataclass
+class BoardAnalysis:
+    scores: dict[str, int]
+    longest_sequence: list[Position]
+    sequence_edges: list[tuple[Position, Position]]
+    group_cells: set[Position]
+    positive_skulls: set[Position]
+    negative_skulls: set[Position]
+
+
+def analyze_board(board: dict[Position, Cell]) -> BoardAnalysis:
+    """Calcula la puntuación y las casillas que la explican."""
     numbers = {position: value for position, value in board.items() if isinstance(value, int)}
-    sequences = sum(
-        1 for position, value in numbers.items()
-        if any(other in numbers and abs(numbers[other] - value) == 1 for other in neighbors(position))
-    )
+    paths: dict[Position, list[Position]] = {}
+    edges: list[tuple[Position, Position]] = []
+    for position in sorted(numbers, key=lambda pos: (numbers[pos], pos)):
+        predecessors = [other for other in neighbors(position)
+                        if numbers.get(other) == numbers[position] - 1]
+        edges.extend((other, position) for other in predecessors)
+        paths[position] = (max((paths[other] for other in predecessors), key=len, default=[])
+                           + [position])
+    longest = max(paths.values(), key=len, default=[])
+    if len(longest) < 2:
+        longest = []
+
     visited: set[Position] = set()
     scored_values: set[int] = set()
+    group_cells: set[Position] = set()
     for position, value in numbers.items():
         if position in visited:
             continue
         stack = [position]
         visited.add(position)
-        size = 0
+        component: set[Position] = set()
         while stack:
             current = stack.pop()
-            size += 1
+            component.add(current)
             for other in neighbors(current):
                 if other not in visited and numbers.get(other) == value:
                     visited.add(other)
                     stack.append(other)
-        if size >= 3:
+        if len(component) >= 3:
             scored_values.add(value)
-    skulls = sum(
-        2 if any(board.get(other) == 9 for other in neighbors(position)) else -2
-        for position, value in board.items() if value == SKULL
-    )
+            group_cells.update(component)
+    positive_skulls = {position for position, value in board.items() if value == SKULL
+                       and any(board.get(other) == 9 for other in neighbors(position))}
+    negative_skulls = {position for position, value in board.items() if value == SKULL} - positive_skulls
+    sequences = len(longest)
     groups = 3 * len(scored_values)
-    return {'secuencias': sequences, 'grupos': groups, 'calaveras': skulls,
-            'total': sequences + groups + skulls}
+    skulls = 2 * (len(positive_skulls) - len(negative_skulls))
+    scores = {'secuencias': sequences, 'grupos': groups, 'calaveras': skulls,
+              'total': sequences + groups + skulls}
+    return BoardAnalysis(scores, longest, edges, group_cells, positive_skulls, negative_skulls)
+
+
+def score(board: dict[Position, Cell]) -> dict[str, int]:
+    return analyze_board(board).scores
 
 
 @dataclass
@@ -117,21 +143,19 @@ class Game:
         self.next_turn()
 
     def next_turn(self) -> None:
-        if all(all(value is not None for value in player.board.values()) for player in self.players):
+        if all(all(player.board[pos] is not None for pos in POSITIONS if pos not in DOORS)
+               for player in self.players):
             self.state = 'finished'
             self.roll = None
             self.revision += 1
             return
 
-        unfinished = [p for p in self.players if any(v is None for v in p.board.values())]
-        door_possible = all(any(p.board[pos] is None for pos in DOORS) for p in unfinished)
-        normal_possible = all(any(p.board[pos] is None for pos in POSITIONS if pos not in DOORS)
-                              for p in unfinished)
-        skull_possible = any(any(p.board[pos] is None for pos in POSITIONS if pos not in DOORS)
-                             for p in self.players)
+        door_possible = any(any(p.board[pos] is None for pos in DOORS) for p in self.players)
+        normal_possible = any(any(p.board[pos] is None for pos in POSITIONS if pos not in DOORS)
+                              for p in self.players)
         valid = [
             roll for roll in ROLLS
-            if (skull_possible if roll[2] == 6 else door_possible if roll[0] == 6 else normal_possible)
+            if (normal_possible if roll[2] == 6 else door_possible if roll[0] == 6 else normal_possible)
         ]
         if not valid:
             raise RuntimeError('No hay ninguna tirada posible para continuar la partida.')
@@ -148,8 +172,11 @@ class Game:
                 if not any(target.board[pos] is None for pos in POSITIONS if pos not in DOORS):
                     self.submitted.add(player.token)
         else:
+            is_door_turn = self.roll[0] == 6
             self.submitted.update(
-                player.token for player in self.players if all(value is not None for value in player.board.values())
+                player.token for player in self.players
+                if not any(player.board[pos] is None for pos in POSITIONS
+                           if (pos in DOORS) == is_door_turn)
             )
         self.revision += 1
 
@@ -245,6 +272,7 @@ def game_page(token: str = '') -> None:
         return
     player = game.player(token)
     ui.page_title('MathGame1 - partida')
+    ui.add_css('.door-cell .q-btn__content { transform: scaleX(1.6); }')
     selected: dict[str, int | None] = {'number': None}
     seen = {'revision': -1}
 
@@ -267,16 +295,18 @@ def game_page(token: str = '') -> None:
                     ui.label('Esperando a que el creador empiece la partida.')
                 return
             if game.state == 'finished':
-                results = [(p, score(p.board)) for p in game.players]
-                best = max(result['total'] for _, result in results)
-                winners = ', '.join(p.name for p, result in results if result['total'] == best)
+                results = [(p, analyze_board(p.board)) for p in game.players]
+                best = max(analysis.scores['total'] for _, analysis in results)
+                winners = ', '.join(p.name for p, analysis in results if analysis.scores['total'] == best)
                 ui.label(f'Ganador(es): {winners}').classes('text-xl font-bold')
-                for p, result in sorted(results, key=lambda item: item[1]['total'], reverse=True):
+                ui.label('Línea verde: secuencia puntuable; gris: otras conexiones consecutivas. '
+                         'Fondo de color: grupo; verde: calavera positiva; cruz roja: negativa.').classes('text-sm')
+                for p, analysis in sorted(results, key=lambda item: item[1].scores['total'], reverse=True):
+                    result = analysis.scores
                     ui.label(f"{p.name}: {result['total']} puntos "
                              f"(secuencias {result['secuencias']}, grupos {result['grupos']}, "
-                             f"calaveras {result['calaveras']:+})")
-                ui.label('Tu tablero:')
-                draw_board(player.board, None)
+                             f"calaveras {result['calaveras']:+})").classes('font-bold')
+                    draw_board(p.board, None, analysis=analysis)
                 ui.link('Nueva partida', '/')
                 return
 
@@ -324,8 +354,34 @@ def game_page(token: str = '') -> None:
     ui.timer(0.7, update)
 
 
-def draw_board(board: dict[Position, Cell], on_place, doors_only: bool = False) -> None:
-    with ui.element('div').classes('grid grid-cols-6 gap-1 w-full'):
+GROUP_COLORS = (
+    '#ffd1dc', '#ffdfba', '#fff2a8', '#d2f3a5', '#a8e6cf',
+    '#a3e4e9', '#b5d8ff', '#c4c6ff', '#e1c4ff', '#ffc4f0',
+    '#e8b99a', '#d1d992', '#9ed3bc', '#b9c9d6', '#e2c6b3',
+)
+
+
+def score_overlay(analysis: BoardAnalysis) -> str:
+    longest_edges = set(zip(analysis.longest_sequence, analysis.longest_sequence[1:]))
+    lines = []
+    for start, end in sorted(analysis.sequence_edges, key=lambda edge: edge in longest_edges):
+        color = '#15803d' if (start, end) in longest_edges else '#64748b'
+        width = 8 if (start, end) in longest_edges else 4
+        lines.append(f'<line x1="{start[1] * 100 + 50}" y1="{start[0] * 100 + 50}" '
+                     f'x2="{end[1] * 100 + 50}" y2="{end[0] * 100 + 50}" '
+                     f'stroke="{color}" stroke-width="{width}" stroke-linecap="round"/>')
+    for row, column in analysis.negative_skulls:
+        x, y = column * 100, row * 100
+        lines.append(f'<path d="M {x + 20} {y + 20} L {x + 80} {y + 80} '
+                     f'M {x + 80} {y + 20} L {x + 20} {y + 80}" '
+                     'stroke="#dc2626" stroke-width="9" stroke-linecap="round"/>')
+    return ('<svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg" '
+            'width="100%" height="100%" aria-hidden="true">' + ''.join(lines) + '</svg>')
+
+
+def draw_board(board: dict[Position, Cell], on_place, doors_only: bool = False,
+               analysis: BoardAnalysis | None = None) -> None:
+    with ui.element('div').classes('grid grid-cols-6 w-full relative'):
         for row in range(6):
             for column in range(6):
                 position = (row, column)
@@ -335,14 +391,44 @@ def draw_board(board: dict[Position, Cell], on_place, doors_only: bool = False) 
                 value = board[position]
                 door = position in DOORS
                 label = str(value) if value is not None else ('🚪' if door else '')
-                enabled = on_place is not None and value is None and door == doors_only
                 description = f'Fila {row + 1}, columna {column + 1}, '
                 description += str(value) if value is not None else ('puerta vacía' if door else 'vacía')
+                if analysis is not None:
+                    if position in analysis.group_cells:
+                        description += ', grupo puntuable'
+                    if position in analysis.positive_skulls:
+                        description += ', calavera positiva'
+                    elif position in analysis.negative_skulls:
+                        description += ', calavera negativa'
+                    if position in analysis.longest_sequence:
+                        description += ', secuencia puntuable'
+                    with ui.element('div').classes(
+                            'aspect-square w-full border flex items-center justify-center text-2xl'
+                    ).props(f'aria-label="{description}"') as cell:
+                        if position in analysis.group_cells and isinstance(value, int):
+                            cell.style(f'background-color: {GROUP_COLORS[(value - 1) % len(GROUP_COLORS)]}')
+                        if position in analysis.positive_skulls:
+                            cell.style('background-color: #86efac')
+                        if value is None and door:
+                            ui.label(label).style(
+                                'font-size: clamp(1.5rem, 11vw, 4.5rem); line-height: 1; transform: scaleX(1.6)'
+                            )
+                        else:
+                            ui.label(label)
+                    continue
+                enabled = on_place is not None and value is None and door == doors_only
                 button = ui.button(label, on_click=lambda e, p=position: on_place(p)).classes(
                     'aspect-square w-full min-w-0 p-0 text-lg'
                 ).props(f'outline aria-label="{description}"')
+                if value is None and door:
+                    button.classes('door-cell')
+                    button.style('font-size: clamp(1.5rem, 11vw, 4.5rem); line-height: 1')
                 if not enabled:
                     button.disable()
+        if analysis is not None:
+            ui.html(score_overlay(analysis), sanitize=False).classes(
+                'absolute inset-0 w-full h-full pointer-events-none'
+            )
 
 
 if __name__ in {'__main__', '__mp_main__'}:
