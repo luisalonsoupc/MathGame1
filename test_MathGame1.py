@@ -725,6 +725,30 @@ class GameTests(unittest.TestCase):
 
 
 class GamePageTests(unittest.TestCase):
+    def test_instruction_precedes_dice_for_each_turn_type(self):
+        for roll, instruction in (
+                ((2, 3, 4), 'Número y casilla sin puerta; fallo: al azar.'),
+                ((6, 3, 4), 'Número y puerta; fallo: jugada al azar.'),
+                ((2, 3, 6), 'Calavera: casilla sin puerta en tablero anónimo.')):
+            with self.subTest(roll=roll):
+                game = Game('TEST')
+                ana, luis = game.add_player('Ana'), game.add_player('Luis')
+                with patch('MathGame1.RNG.choice', return_value=roll):
+                    game.start(ana.token)
+                events = []
+
+                def label(text):
+                    events.append(text)
+                    return MagicMock()
+
+                with patch.dict(TOKENS, {ana.token: game}, clear=True), \
+                        patch('MathGame1.ui') as ui, patch('MathGame1.draw_board'), \
+                        patch('MathGame1.draw_roll', side_effect=lambda _: events.append('dados')):
+                    ui.refreshable.side_effect = lambda render: render
+                    ui.label.side_effect = label
+                    game_page(ana.token)
+                self.assertLess(events.index(instruction), events.index('dados'))
+
     def test_nicegui_2_disconnect_handler_does_not_depend_on_stale_tab_id(self):
         game = Game('TEST')
         player = game.add_player('Ana')
@@ -919,23 +943,44 @@ class GamePageTests(unittest.TestCase):
             game_page(ana.token)
             labels = [call.args[0] for call in ui.label.call_args_list]
             ranking = [label for label in labels if label.startswith(('1.', '3.'))]
-            self.assertEqual(ranking, [
-                '1. Ana: 3 puntos (secuencias 3, grupos 0, calaveras +0)',
-                '1. María: 3 puntos (secuencias 3, grupos 0, calaveras +0)',
-                '3. Luis: -2 puntos (secuencias 0, grupos 0, calaveras -2)',
-            ])
+            self.assertEqual(ranking, ['1.', '1.', '3.'])
+            self.assertEqual([label for label in labels if label in ('Ana', 'María', 'Luis')],
+                             ['Ana', 'María', 'Luis'])
+            self.assertEqual([label for label in labels if label in ('🥇', '🥈', '🥉')], ['🥇', '🥇', '🥉'])
+            self.assertIn('Ana, María', labels)
+            self.assertNotIn('Jugador: Ana', labels)
+            self.assertIn('= secuencias 0 + grupos 0 - calaveras 2', labels)
+            ui.link.assert_called_with('Nueva partida', '/')
+            ui.link.return_value.classes.assert_called_with('status-badge new-game-link font-bold')
             board.assert_not_called()
             buttons = {call.args[0]: call.kwargs['on_click'] for call in ui.button.call_args_list}
             ui.label.reset_mock()
             buttons['Ver tablero de Luis'](None)
             self.assertIs(board.call_args.args[0], luis.board)
-            ui.label.assert_any_call('-2 puntos (secuencias 0, grupos 0, calaveras -2)')
+            ui.label.assert_any_call('-2 puntos = secuencias 0 + grupos 0 - calaveras 2')
             ui.label.reset_mock()
             buttons['Ver tablero de Ana'](None)
             self.assertIs(board.call_args.args[0], ana.board)
-            ui.label.assert_any_call('3 puntos (secuencias 3, grupos 0, calaveras +0)')
+            ui.label.assert_any_call('3 puntos = secuencias 3 + grupos 0 + calaveras 0')
             self.assertEqual(ui.dialog.return_value.clear.call_count, 2)
             self.assertEqual(ui.dialog.return_value.open.call_count, 2)
+
+    def test_results_show_medals_for_first_three_distinct_places(self):
+        game = Game('TEST')
+        players = [game.add_player(name) for name in ('Ana', 'Luis', 'María', 'Eva')]
+        path = ((0, 2), (0, 3), (1, 4), (2, 5))
+        for player, length in zip(players, (4, 3, 2, 0)):
+            player.board.update({position: index for index, position in enumerate(path[:length], start=1)})
+        game.state = 'finished'
+        with patch.dict(TOKENS, {players[0].token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board'):
+            ui.refreshable.side_effect = lambda render: render
+            game_page(players[0].token)
+            labels = [call.args[0] for call in ui.label.call_args_list]
+        self.assertEqual([label for label in labels if label in ('🥇', '🥈', '🥉')], ['🥇', '🥈', '🥉'])
+        self.assertEqual([label for label in labels if label in ('1.', '2.', '3.', '4.')],
+                         ['1.', '2.', '3.', '4.'])
+        self.assertIn('🏆 Ganador', labels)
 
     def test_number_selection_and_penalty(self):
         game = Game('TEST')

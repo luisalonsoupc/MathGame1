@@ -140,6 +140,59 @@ GAME_CSS = '''
     .game-logo svg { width: 100%; height: auto; display: block; }
     .clock-value { font-size: 1.35rem; font-weight: 700; }
     .clock-warning { color: #b91c1c; }
+    .game-heading { flex-wrap: nowrap; }
+    .game-code { font-size: 0.75rem; white-space: nowrap; flex-shrink: 0; }
+    .game-heading .status-player {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .game-heading .status-turn { white-space: nowrap; padding: 3px 6px; font-size: 0.875rem; }
+    .turn-instruction { white-space: nowrap; }
+    .turn-progress { flex: 1 1 0; min-width: 0; }
+    .winner-card {
+        padding: 1rem;
+        border: 2px solid #d59c29;
+        border-radius: 1rem;
+        background: linear-gradient(145deg, #fff4ad, #f7bd4d);
+        box-shadow: inset 0 2px 3px #fff9d8, 0 5px 0 #b77c28, 0 9px 14px #80662b38;
+        color: #654012;
+        overflow-wrap: anywhere;
+    }
+    .ranking-entry {
+        width: 100%;
+        padding: 0.75rem;
+        border: 1px solid #b7cfbd;
+        border-radius: 0.8rem;
+        background: linear-gradient(145deg, #fbfff8, #e1efdf);
+        box-shadow: inset 0 2px 3px #fff, 0 3px 0 #a6bea9, 0 5px 8px #2c543021;
+    }
+    .ranking-position { color: #3055a4; font-weight: 800; white-space: nowrap; }
+    .ranking-medal { font-size: 1.4rem; line-height: 1; }
+    .ranking-name { color: #12684f; font-weight: 800; flex: 1 1 6rem; overflow-wrap: anywhere; }
+    .ranking-total { color: #9a431b; font-weight: 800; white-space: nowrap; }
+    .ranking-breakdown { color: #5c4875; overflow-wrap: anywhere; }
+    .new-game-link {
+        background: linear-gradient(#e4e6ff, #cbd2f8);
+        color: #273b7a;
+        text-decoration: none;
+    }
+    @media (max-width: 480px) {
+        .game-view { padding: 4px; gap: 5px; }
+        .game-heading { gap: 5px; }
+        .game-heading .status-badge { padding: 3px 6px; }
+        .game-heading .status-player { font-size: 0.75rem; }
+        .turn-instruction { font-size: 10px; }
+        .game-view .die-face { width: 46px; }
+        .game-view .clock-value { padding: 3px 8px; }
+        .game-view .number-grid { gap: 4px; }
+        .game-view .board-frame {
+            width: min(100%, max(180px, calc(100dvh - 315px)));
+            align-self: center;
+        }
+    }
     .die-face {
         position: relative;
         width: clamp(54px, 16vw, 72px);
@@ -738,9 +791,15 @@ def game_page(token: str = '') -> None:
         nonlocal clock_label, continue_label
         clock_label = None
         continue_label = None
-        with ui.column().classes('w-full max-w-xl mx-auto p-3 gap-3'):
-            ui.label(f'Partida {game.code}').classes('text-2xl font-bold')
-            ui.label(f'Jugador: {player.name}').classes('status-badge status-player')
+        with ui.column().classes('w-full max-w-xl mx-auto p-3 gap-3 game-view'):
+            with ui.row().classes('w-full items-center gap-2 game-heading'):
+                code_label = ui.label(f'Partida {game.code}').classes('font-bold game-code')
+                if game.state == 'finished':
+                    code_label.classes('status-badge status-turn')
+                else:
+                    ui.label(f'Jugador: {player.name}').classes('status-badge status-player')
+                if game.state in ('playing', 'between_turns'):
+                    ui.label(f'Turno {game.turn}').classes('status-badge status-turn font-bold')
             if game.state == 'waiting':
                 ui.label('Comparte el código de partida. No compartas la dirección de esta página.')
                 ui.label('Jugadores: ' + ', '.join(p.name for p in game.players))
@@ -764,21 +823,25 @@ def game_page(token: str = '') -> None:
                 results = sorted(((p, analyze_board(p.board)) for p in game.players),
                                  key=lambda item: item[1].scores['total'], reverse=True)
                 best = max(analysis.scores['total'] for _, analysis in results)
-                winners = ', '.join(p.name for p, analysis in results if analysis.scores['total'] == best)
-                ui.label(f'Ganador(es): {winners}').classes('text-xl font-bold')
+                winners = [p.name for p, analysis in results if analysis.scores['total'] == best]
+                with ui.column().classes('winner-card w-full gap-1'):
+                    ui.label('🏆 ' + ('Ganador' if len(winners) == 1 else 'Ganadores')).classes('text-lg font-bold')
+                    ui.label(', '.join(winners)).classes('text-2xl font-bold')
                 ui.label('Clasificación').classes('text-lg font-bold')
                 board_dialog = ui.dialog()
 
-                def format_result(analysis: BoardAnalysis) -> str:
+                def format_breakdown(analysis: BoardAnalysis) -> str:
                     result = analysis.scores
-                    return (f"{result['total']} puntos (secuencias {result['secuencias']}, "
-                            f"grupos {result['grupos']}, calaveras {result['calaveras']:+})")
+                    skulls = result['calaveras']
+                    sign = '-' if skulls < 0 else '+'
+                    return (f"= secuencias {result['secuencias']} + grupos {result['grupos']} "
+                            f"{sign} calaveras {abs(skulls)}")
 
                 def show_board(p: Player, analysis: BoardAnalysis) -> None:
                     board_dialog.clear()
                     with board_dialog, ui.card().classes('w-full max-w-xl'):
                         ui.label(f'Tablero de {p.name}').classes('text-lg font-bold')
-                        ui.label(format_result(analysis)).classes('font-bold')
+                        ui.label(f"{analysis.scores['total']} puntos {format_breakdown(analysis)}").classes('font-bold')
                         ui.label('Línea verde: secuencia puntuable; gris discontinua: secuencia menor '
                                  'de al menos 3 casillas. Fondo de color: grupo; verde: calavera positiva; '
                                  'cruz roja: negativa.').classes('text-sm')
@@ -793,24 +856,43 @@ def game_page(token: str = '') -> None:
                     if result['total'] != previous_total:
                         rank = index
                         previous_total = result['total']
-                    ui.label(f'{rank}. {p.name}: {format_result(analysis)}').classes('font-bold')
-                    ui.button(f'Ver tablero de {p.name}',
-                              on_click=lambda e, player=p, result=analysis: show_board(player, result)).props('outline')
-                ui.link('Nueva partida', '/')
+                    with ui.column().classes('ranking-entry gap-2'):
+                        with ui.row().classes('w-full items-center gap-2'):
+                            with ui.row().classes('items-center gap-1'):
+                                if rank <= 3:
+                                    medal, label = (('🥇', 'oro'), ('🥈', 'plata'), ('🥉', 'bronce'))[rank - 1]
+                                    ui.label(medal).classes('ranking-medal').props(f'role=img aria-label="Medalla de {label}"')
+                                ui.label(f'{rank}.').classes('ranking-position')
+                            ui.label(p.name).classes('ranking-name')
+                            ui.label(f"{result['total']} puntos").classes('ranking-total')
+                        ui.label(format_breakdown(analysis)).classes('ranking-breakdown')
+                        ui.button(f'Ver tablero de {p.name}',
+                                  on_click=lambda e, player=p, result=analysis: show_board(player, result)).props(
+                                      'outline dense')
+                ui.link('Nueva partida', '/').classes('status-badge new-game-link font-bold')
                 return
 
             assert game.roll is not None
             skull = game.roll[2] == 6
             done = token in game.submitted
-            ui.label(f'Turno {game.turn}').classes('status-badge status-turn text-lg font-bold')
+            if game.state == 'playing' and not done:
+                if skull:
+                    instruction = 'Calavera: casilla sin puerta en tablero anónimo.'
+                elif game.roll[0] == 6:
+                    instruction = 'Número y puerta; fallo: jugada al azar.'
+                else:
+                    instruction = 'Número y casilla sin puerta; fallo: al azar.'
+                ui.label(instruction).classes('turn-instruction')
             draw_roll(game.roll)
-            ui.label(f'Jugadores que han terminado el turno: {len(game.submitted)}/{len(game.players)}')
-            ui.linear_progress(value=len(game.submitted) / len(game.players),
-                               size='12px', show_value=False).props('rounded').classes('w-full')
-            if game.turn_seconds is not None:
-                remaining = game.remaining_seconds()
-                clock_label = ui.label(clock_text(remaining)).classes('status-badge status-turn clock-value')
-                update_clock(remaining)
+            with ui.row().classes('w-full items-center gap-2 no-wrap'):
+                if game.turn_seconds is not None:
+                    remaining = game.remaining_seconds()
+                    clock_label = ui.label(clock_text(remaining)).classes('status-badge status-turn clock-value')
+                    update_clock(remaining)
+                with ui.column().classes('turn-progress gap-1'):
+                    ui.label(f'Han jugado: {len(game.submitted)}/{len(game.players)}').classes('text-sm')
+                    ui.linear_progress(value=len(game.submitted) / len(game.players),
+                                       size='12px', show_value=False).props('rounded').classes('w-full')
             if game.state == 'between_turns':
                 ui.label('Turno completado. Pulsa para continuar.').classes('text-xl font-bold')
                 ui.label(f'Jugadores preparados: {len(game.ready)}/{len(game.players)}')
@@ -837,12 +919,9 @@ def game_page(token: str = '') -> None:
                 draw_board(player.board, None)
                 return
             if skull:
-                ui.label('Calavera: marca una casilla vacía sin puerta en este tablero anónimo.')
                 target = game.player(game.targets[token])
             else:
                 target = player
-                ui.label('Elige un número y toca una casilla ' + ('con puerta.' if game.roll[0] == 6 else 'sin puerta.'))
-                ui.label('Si eliges un número incorrecto, se colocará uno válido al azar.').classes('text-sm')
                 if selected['turn'] != game.turn:
                     selected.update(number=None, turn=game.turn)
 
@@ -868,7 +947,7 @@ def game_page(token: str = '') -> None:
                 update()
 
             if not skull:
-                with ui.element('div').classes('grid grid-cols-5 gap-2 w-full'):
+                with ui.element('div').classes('grid grid-cols-5 gap-2 w-full number-grid'):
                     for number in range(1, 16):
                         button = ui.button(str(number), on_click=lambda e, n=number: choose(n)).classes(
                             'number-choice w-full')
