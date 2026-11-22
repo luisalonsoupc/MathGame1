@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from itertools import product
 
-from nicegui import app, ui
+from nicegui import __version__ as nicegui_version, app, ui
 
 
 Position = tuple[int, int]
@@ -31,6 +31,31 @@ ROLLS = tuple(product(range(1, 7), repeat=3))
 RNG = random.SystemRandom()
 ROOMS: dict[str, Game] = {}
 TOKENS: dict[str, Game] = {}
+CONNECTIONS: dict[str, set[str]] = {}
+DISCONNECT_TASKS: dict[str, asyncio.Task[None]] = {}
+DISCONNECT_GRACE_SECONDS = 5
+
+LOGO_SVG = '''
+<svg viewBox="0 0 520 126" role="img" aria-label="Math Game 1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="logo-board" x2="1" y2="1">
+      <stop stop-color="#427b61"/><stop offset="1" stop-color="#1f4d43"/>
+    </linearGradient>
+    <linearGradient id="logo-die" x2="1" y2="1">
+      <stop stop-color="#fffdf2"/><stop offset="1" stop-color="#d7e9d7"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="6" width="512" height="112" rx="25" fill="#9a6038"/>
+  <rect x="4" y="2" width="512" height="112" rx="25" fill="url(#logo-board)" stroke="#d8bb7a" stroke-width="4"/>
+  <rect x="23" y="23" width="69" height="69" rx="15" fill="url(#logo-die)" transform="rotate(-8 57 57)"/>
+  <g fill="#28584b"><circle cx="40" cy="38" r="5"/><circle cx="73" cy="38" r="5"/>
+    <circle cx="57" cy="57" r="5"/><circle cx="40" cy="76" r="5"/><circle cx="73" cy="76" r="5"/></g>
+  <text x="109" y="57" fill="#fff9df" font-family="Trebuchet MS, sans-serif" font-size="38" font-weight="800">MATH GAME</text>
+  <text x="110" y="91" fill="#ffda86" font-family="Trebuchet MS, sans-serif" font-size="22" font-weight="700" letter-spacing="3">JUEGA · SUMA · GANA</text>
+  <circle cx="464" cy="57" r="31" fill="#f3c76e" stroke="#fff1be" stroke-width="3"/>
+  <text x="464" y="70" text-anchor="middle" fill="#28584b" font-family="Trebuchet MS, sans-serif" font-size="43" font-weight="900">1</text>
+</svg>
+'''
 
 GAME_CSS = '''
     body {
@@ -111,6 +136,10 @@ GAME_CSS = '''
     .status-turn {
         background: linear-gradient(#fff0cc, #f8dca4);
     }
+    .game-logo { width: min(100%, 520px); }
+    .game-logo svg { width: 100%; height: auto; display: block; }
+    .clock-value { font-size: 1.35rem; font-weight: 700; }
+    .clock-warning { color: #b91c1c; }
     .die-face {
         position: relative;
         width: clamp(54px, 16vw, 72px);
@@ -266,8 +295,11 @@ class Game:
     ready: set[str] = field(default_factory=set)
     targets: dict[str, str] = field(default_factory=dict)
     turn_seconds: int | None = None
+    continue_seconds: int | None = None
     deadline: float | None = None
+    continue_deadline: float | None = None
     timed_out: set[str] = field(default_factory=set)
+    ended_early: bool = False
 
     def add_player(self, name: str) -> Player:
         name = name.strip()
@@ -286,6 +318,38 @@ class Game:
     def player(self, token: str) -> Player:
         return next(player for player in self.players if player.token == token)
 
+    def remove_player(self, token: str) -> None:
+        if self.state == 'finished' or not any(p.token == token for p in self.players):
+            return
+        if self.state == 'playing' and self.roll is not None and self.roll[2] == 6 and len(self.players) > 2:
+            successor = self.targets[token]
+            predecessor = next(t for t, target in self.targets.items() if target == token)
+            self.targets[predecessor] = successor
+            if predecessor not in self.submitted and not any(
+                    self.player(successor).board[pos] is None for pos in POSITIONS if pos not in DOORS):
+                self.submitted.add(predecessor)
+        self.players = [p for p in self.players if p.token != token]
+        self.submitted.discard(token)
+        self.ready.discard(token)
+        self.timed_out.discard(token)
+        self.targets.pop(token, None)
+        if TOKENS.get(token) is self:
+            del TOKENS[token]
+        self.revision += 1
+        if not self.players:
+            if ROOMS.get(self.code) is self:
+                del ROOMS[self.code]
+        elif self.state != 'waiting' and len(self.players) == 1:
+            self.state = 'finished'
+            self.roll = None
+            self.deadline = None
+            self.continue_deadline = None
+            self.ended_early = True
+        elif self.state == 'playing' and len(self.submitted) == len(self.players):
+            self.finish_turn()
+        elif self.state == 'between_turns' and len(self.ready) == len(self.players):
+            self.next_turn()
+
     def start(self, token: str) -> None:
         if self.state != 'waiting' or not self.players or self.players[0].token != token:
             raise ValueError('Solo el creador puede iniciar la partida.')
@@ -297,6 +361,7 @@ class Game:
     def next_turn(self) -> None:
         self.ready.clear()
         self.deadline = None
+        self.continue_deadline = None
         if all(all(player.board[pos] is not None for pos in POSITIONS if pos not in DOORS)
                for player in self.players):
             self.state = 'finished'
@@ -369,10 +434,16 @@ class Game:
         self.submitted.add(token)
         self.revision += 1
         if len(self.submitted) == len(self.players):
-            self.state = 'between_turns'
-            self.deadline = None
+            self.finish_turn()
+
+    def finish_turn(self) -> None:
+        self.state = 'between_turns'
+        self.deadline = None
+        self.continue_deadline = (time.monotonic() + self.continue_seconds
+                                  if self.continue_seconds is not None else None)
 
     def continue_turn(self, token: str, turn: int) -> None:
+        self.expire_continue()
         if self.state != 'between_turns' or turn != self.turn:
             raise ValueError('El turno ya ha cambiado. Espera la actualización.')
         if not any(player.token == token for player in self.players):
@@ -408,6 +479,16 @@ class Game:
             return None
         return max(0, math.ceil(self.deadline - time.monotonic()))
 
+    def continue_remaining_seconds(self) -> int | None:
+        if self.continue_deadline is None:
+            return None
+        return max(0, math.ceil(self.continue_deadline - time.monotonic()))
+
+    def expire_continue(self) -> None:
+        if (self.state == 'between_turns' and self.continue_deadline is not None
+                and time.monotonic() >= self.continue_deadline):
+            self.next_turn()
+
     def expire_turn(self) -> None:
         if self.state != 'playing' or self.deadline is None or time.monotonic() < self.deadline:
             return
@@ -427,15 +508,16 @@ class Game:
             self.timed_out.add(player.token)
 
 
-def create_game(name: str, turn_seconds: int | None = None) -> tuple[Game, Player]:
-    if turn_seconds is not None and (isinstance(turn_seconds, bool) or
-                                     not isinstance(turn_seconds, int) or turn_seconds < 1):
-        raise ValueError('El tiempo por turno debe ser un número entero de segundos mayor que cero.')
+def create_game(name: str, turn_seconds: int | None = None,
+                continue_seconds: int | None = None) -> tuple[Game, Player]:
+    for value, description in ((turn_seconds, 'por turno'), (continue_seconds, 'para continuar')):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 1):
+            raise ValueError(f'El tiempo {description} debe ser un número entero de segundos mayor que cero.')
     while True:
         code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
         if code not in ROOMS:
             break
-    game = Game(code, turn_seconds=turn_seconds)
+    game = Game(code, turn_seconds=turn_seconds, continue_seconds=continue_seconds)
     player = game.add_player(name)
     ROOMS[code] = game
     return game, player
@@ -444,12 +526,40 @@ def create_game(name: str, turn_seconds: int | None = None) -> tuple[Game, Playe
 def expire_games() -> None:
     for game in tuple(ROOMS.values()):
         game.expire_turn()
+        game.expire_continue()
 
 
 async def expiration_loop() -> None:
     while True:
         expire_games()
         await asyncio.sleep(0.2)
+
+
+def connect_player(game: Game, token: str, client_id: str) -> None:
+    if TOKENS.get(token) is not game:
+        return
+    CONNECTIONS.setdefault(token, set()).add(client_id)
+    task = DISCONNECT_TASKS.pop(token, None)
+    if task is not None:
+        task.cancel()
+
+
+def disconnect_player(game: Game, token: str, client_id: str) -> None:
+    clients = CONNECTIONS.get(token)
+    if clients is None or client_id not in clients:
+        return
+    clients.remove(client_id)
+    if clients:
+        return
+    del CONNECTIONS[token]
+
+    async def remove_after_grace() -> None:
+        await asyncio.sleep(DISCONNECT_GRACE_SECONDS)
+        DISCONNECT_TASKS.pop(token, None)
+        if token not in CONNECTIONS:
+            game.remove_player(token)
+
+    DISCONNECT_TASKS[token] = asyncio.create_task(remove_after_grace())
 
 
 app.on_startup(expiration_loop)
@@ -492,7 +602,7 @@ def index() -> None:
     ui.add_css(GAME_CSS)
     with ui.column().classes('w-full max-w-lg mx-auto p-4 gap-4') as page:
         has_rooms = bool(ROOMS)
-        title = ui.label('MathGame1').classes('text-3xl font-bold').set_visibility(has_rooms)
+        ui.html(LOGO_SVG, sanitize=False).classes('game-logo')
         description = ui.label('Crea una partida o únete con el código que te hayan compartido.').set_visibility(has_rooms)
         name = ui.input('Tu nombre', validation={'Máximo 30 caracteres': lambda v: len(v or '') <= 30}).classes('w-full')
         code = ui.input('Código de partida').props('maxlength=6').classes('w-full').set_visibility(has_rooms)
@@ -503,17 +613,22 @@ def index() -> None:
                 timed = ui.checkbox('Limitar el tiempo de cada turno', value=False)
                 seconds = ui.number('Segundos por turno', value=30, min=1, step=1,
                                     precision=0).bind_visibility_from(timed, 'value')
+                timed_continue = ui.checkbox('Limitar la espera para continuar', value=False)
+                continue_seconds = ui.number('Segundos para continuar', value=15, min=1, step=1,
+                                             precision=0).bind_visibility_from(timed_continue, 'value')
+
+                def read_seconds(enabled: bool | None, value: float | None, description: str) -> int | None:
+                    if not enabled:
+                        return None
+                    if value is None or not math.isfinite(value) or value < 1 or not float(value).is_integer():
+                        raise ValueError(f'El tiempo {description} debe ser un número entero de segundos mayor que cero.')
+                    return int(value)
 
                 def confirm() -> None:
-                    turn_seconds = None
-                    if timed.value:
-                        value = seconds.value
-                        if value is None or not math.isfinite(value) or value < 1 or not float(value).is_integer():
-                            notice(ValueError('El tiempo por turno debe ser un número entero de segundos mayor que cero.'))
-                            return
-                        turn_seconds = int(value)
                     try:
-                        _, player = create_game(name.value or '', turn_seconds)
+                        turn_limit = read_seconds(timed.value, seconds.value, 'por turno')
+                        continue_limit = read_seconds(timed_continue.value, continue_seconds.value, 'para continuar')
+                        _, player = create_game(name.value or '', turn_limit, continue_limit)
                     except ValueError as error:
                         notice(error)
                         return
@@ -562,7 +677,7 @@ def index() -> None:
             state = (waiting_codes(), bool(ROOMS))
             if state != seen_state:
                 seen_state = state
-                for element in (title, description, code, footer):
+                for element in (description, code, footer):
                     element.set_visibility(state[1])
                 available_games.refresh(*state)
 
@@ -578,25 +693,51 @@ def game_page(token: str = '') -> None:
         ui.link('Volver al inicio', '/')
         return
     player = game.player(token)
+    client = ui.context.client
+
+    def on_connect() -> None:
+        if TOKENS.get(token) is not game:
+            ui.navigate.to('/')
+            return
+        connect_player(game, token, client.id)
+
+    def on_disconnect() -> None:
+        # NiceGUI 2 only calls this handler after its reconnect timeout and keeps tab_id set.
+        if int(nicegui_version.split('.')[0]) < 3 or not client.has_socket_connection:
+            disconnect_player(game, token, client.id)
+
+    client.on_connect(on_connect)
+    client.on_disconnect(on_disconnect)
     ui.page_title('MathGame1 - partida')
     selected: dict[str, int | None] = {'number': None, 'turn': None}
     seen = {'revision': -1}
-    clock_labels: dict[str, ui.label] = {}
+    clock_label: ui.label | None = None
+    continue_label: ui.label | None = None
 
-    def clock_text(p: Player, remaining: int | None) -> str:
-        if p.token in game.timed_out:
+    def clock_text(remaining: int | None) -> str:
+        if token in game.timed_out:
             status = 'Tiempo agotado · jugada automática'
-        elif p.token in game.submitted:
+        elif token in game.submitted:
             status = 'Turno completado o pasado'
         elif remaining is not None:
             status = f'⏱ {remaining} s'
         else:
             status = 'Esperando'
-        return f'{p.name}: {status}'
+        return status
+
+    def update_clock(remaining: int | None) -> None:
+        if clock_label is None:
+            return
+        clock_label.set_text(clock_text(remaining))
+        warning = remaining is not None and remaining < 10 and token not in game.submitted
+        clock_label.classes(add='clock-warning' if warning else None,
+                            remove=None if warning else 'clock-warning')
 
     @ui.refreshable
     def content() -> None:
-        clock_labels.clear()
+        nonlocal clock_label, continue_label
+        clock_label = None
+        continue_label = None
         with ui.column().classes('w-full max-w-xl mx-auto p-3 gap-3'):
             ui.label(f'Partida {game.code}').classes('text-2xl font-bold')
             ui.label(f'Jugador: {player.name}').classes('status-badge status-player')
@@ -605,6 +746,8 @@ def game_page(token: str = '') -> None:
                 ui.label('Jugadores: ' + ', '.join(p.name for p in game.players))
                 if game.turn_seconds is not None:
                     ui.label(f'Tiempo por turno: {game.turn_seconds} segundos')
+                if game.continue_seconds is not None:
+                    ui.label(f'Espera máxima para continuar: {game.continue_seconds} segundos')
                 if player is game.players[0]:
                     def start() -> None:
                         try:
@@ -616,6 +759,8 @@ def game_page(token: str = '') -> None:
                     ui.label('Esperando a que el creador empiece la partida.')
                 return
             if game.state == 'finished':
+                if game.ended_early:
+                    ui.label('La partida ha terminado porque solo queda un jugador.').classes('font-bold')
                 results = sorted(((p, analyze_board(p.board)) for p in game.players),
                                  key=lambda item: item[1].scores['total'], reverse=True)
                 best = max(analysis.scores['total'] for _, analysis in results)
@@ -664,13 +809,14 @@ def game_page(token: str = '') -> None:
                                size='12px', show_value=False).props('rounded').classes('w-full')
             if game.turn_seconds is not None:
                 remaining = game.remaining_seconds()
-                with ui.column().classes('status-badge status-turn w-full gap-1'):
-                    ui.label('Tiempo de los jugadores').classes('font-bold')
-                    for p in game.players:
-                        clock_labels[p.token] = ui.label(clock_text(p, remaining)).classes('font-bold')
+                clock_label = ui.label(clock_text(remaining)).classes('status-badge status-turn clock-value')
+                update_clock(remaining)
             if game.state == 'between_turns':
                 ui.label('Turno completado. Pulsa para continuar.').classes('text-xl font-bold')
                 ui.label(f'Jugadores preparados: {len(game.ready)}/{len(game.players)}')
+                if game.continue_deadline is not None:
+                    continue_label = ui.label(
+                        f'Continuación automática en {game.continue_remaining_seconds()} s').classes('font-bold')
                 if token in game.ready:
                     ui.label('Esperando a que los demás jugadores continúen.')
                 else:
@@ -730,6 +876,10 @@ def game_page(token: str = '') -> None:
                             button.props('outline')
 
             def place(position: Position) -> None:
+                if skull and game.targets.get(token) != target.token:
+                    notice(ValueError('El tablero asignado ha cambiado. Espera la actualización.'))
+                    update()
+                    return
                 try:
                     game.place(token, position, selected['number'], current_turn)
                 except ValueError as error:
@@ -743,12 +893,10 @@ def game_page(token: str = '') -> None:
         if seen['revision'] != game.revision:
             seen['revision'] = game.revision
             content.refresh()
-        if clock_labels:
-            remaining = game.remaining_seconds()
-            for p in game.players:
-                label = clock_labels.get(p.token)
-                if label is not None:
-                    label.set_text(clock_text(p, remaining))
+        if clock_label is not None:
+            update_clock(game.remaining_seconds())
+        if continue_label is not None:
+            continue_label.set_text(f'Continuación automática en {game.continue_remaining_seconds()} s')
 
     content()
     seen['revision'] = game.revision

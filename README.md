@@ -5,8 +5,8 @@ los demás se unen con su propio nombre. El creador inicia la partida cuando tod
 están presentes. Se necesitan al menos dos jugadores.
 La pantalla inicial muestra los códigos de las partidas que todavía no han
 empezado y destaca la opción de unirse mientras haya alguna disponible.
-Si aún no se ha creado ninguna partida, solo muestra el nombre y la opción de
-crear una.
+Si aún no se ha creado ninguna partida, muestra el logotipo, el nombre y la
+opción de crear una.
 
 ## Ejecutar
 
@@ -26,6 +26,10 @@ instancia y un solo proceso; las partidas no se comparten entre instancias.
 Render puede suspender los servicios inactivos según el plan contratado.
 El código permite unirse antes de empezar. La dirección personal de la página
 identifica al jugador: no la compartas; comparte solo el código.
+Si un jugador se desconecta, dispone de unos segundos para reconectarse; si
+no vuelve, se elimina de la partida. Si el creador abandona la sala de espera,
+el siguiente jugador pasa a ser el creador. Durante la partida, si solo queda
+un jugador, la partida termina y se muestran sus resultados.
 
 ## Reglas aplicadas
 
@@ -33,15 +37,18 @@ identifica al jugador: no la compartas; comparte solo el código.
   sin puerta, aunque queden puertas vacías.
 - Todos juegan una vez por turno. Cuando todos han actuado o pasado, cada
   jugador debe pulsar «Continuar» antes de comenzar el siguiente turno o ver
-  los resultados finales. Un jugador sin casillas libres del tipo de la tirada
-  pasa, pero puede seguir colocando calaveras en tableros ajenos.
+  los resultados finales. Al crear la partida se puede limitar esta espera:
+  si se agota el plazo compartido, se continúa automáticamente aunque falten
+  confirmaciones. Por defecto la espera no tiene límite. Un jugador sin
+  casillas libres del tipo de la tirada pasa, pero puede seguir colocando
+  calaveras en tableros ajenos.
 - Al crear una partida se puede activar un límite de segundos por turno; por
-  defecto no hay límite. Todos los jugadores comparten la cuenta atrás, que
-  comienza cuando todos han confirmado el inicio del turno. Al agotarse, el
+  defecto no hay límite. Todos los jugadores comparten la cuenta atrás, aunque
+  cada uno solo ve su propio cronómetro. Este comienza al iniciarse el turno,
+  después de las confirmaciones o al agotarse la espera para continuar. Al agotarse, el
   servidor juega por quienes aún no lo han hecho: elige al azar un número
   válido y una casilla válida vacía, o coloca una calavera en una casilla
-  válida aleatoria del tablero asignado. La espera de las confirmaciones no
-  tiene límite de tiempo.
+  válida aleatoria del tablero asignado.
 - La llave obliga a usar una puerta y prevalece sobre el corazón. El corazón
   permite escoger del 1 al 15 si no hay llave. La calavera prevalece sobre
   ambos y asigna aleatoriamente a cada jugador el tablero de otra persona,

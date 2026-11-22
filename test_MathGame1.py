@@ -1,9 +1,11 @@
+import asyncio
 import unittest
 from unittest.mock import MagicMock, patch
 
-from MathGame1 import (DOORS, HEART, KEY, POSITIONS, ROOMS, SKULL, TOKENS, Game, analyze_board,
-                       create_game, draw_board, draw_roll, expire_games, game_page, index, score,
-                       score_overlay, skull_overlay)
+from MathGame1 import (CONNECTIONS, DISCONNECT_TASKS, DOORS, HEART, KEY, POSITIONS, ROOMS, SKULL,
+                       TOKENS, Game, analyze_board, connect_player, create_game, disconnect_player,
+                       draw_board, draw_roll, expire_games, game_page, index, score, score_overlay,
+                       skull_overlay)
 
 
 class IndexTests(unittest.TestCase):
@@ -44,6 +46,7 @@ class IndexTests(unittest.TestCase):
             ui.refreshable.side_effect = refreshable
             index()
             update = ui.timer.call_args.args[1]
+            self.assertIn('Math Game 1', ui.html.call_args.args[0])
 
             self.assertEqual([call.args[0] for call in ui.button.call_args_list],
                              ['Crear partida'])
@@ -105,8 +108,11 @@ class IndexTests(unittest.TestCase):
                 patch('MathGame1.ui') as ui:
             ui.refreshable.side_effect = refreshable
             ui.input.return_value.classes.return_value.value = 'Ana'
-            checkbox = ui.checkbox.return_value
-            seconds = ui.number.return_value.bind_visibility_from.return_value
+            checkbox, continue_checkbox = MagicMock(value=False), MagicMock(value=False)
+            seconds, continue_seconds = MagicMock(value=30), MagicMock(value=15)
+            ui.checkbox.side_effect = [checkbox, continue_checkbox]
+            ui.number.side_effect = [MagicMock(bind_visibility_from=MagicMock(return_value=seconds)),
+                                     MagicMock(bind_visibility_from=MagicMock(return_value=continue_seconds))]
             index()
             ui.button.call_args.kwargs['on_click']()
             self.assertEqual(ROOMS, {})
@@ -118,8 +124,14 @@ class IndexTests(unittest.TestCase):
             self.assertEqual(ROOMS, {})
             ui.notify.assert_called_once()
             seconds.value = 12
+            continue_checkbox.value = True
+            continue_seconds.value = 0
+            confirm()
+            self.assertEqual(ROOMS, {})
+            continue_seconds.value = 7
             confirm()
             self.assertEqual(next(iter(ROOMS.values())).turn_seconds, 12)
+            self.assertEqual(next(iter(ROOMS.values())).continue_seconds, 7)
 
 
 class DiceTests(unittest.TestCase):
@@ -270,6 +282,169 @@ class TimedGameTests(unittest.TestCase):
                     self.game.place(self.first.token, POSITIONS[-1], 2, self.game.turn)
         self.assertEqual(sum(v is not None for v in self.first.board.values()), 1)
         self.assertIsNone(self.first.board[POSITIONS[-1]])
+
+
+class ContinueTimeoutTests(unittest.TestCase):
+    def setUp(self):
+        self.game = Game('TEST', turn_seconds=20, continue_seconds=5)
+        self.ana, self.luis = self.game.add_player('Ana'), self.game.add_player('Luis')
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            self.game.start(self.ana.token)
+            self.game.place(self.ana.token, POSITIONS[0], 2, self.game.turn)
+            self.game.place(self.luis.token, POSITIONS[0], 2, self.game.turn)
+
+    def test_limit_starts_when_turn_ends_and_expires_without_clients(self):
+        self.assertEqual(self.game.continue_deadline, 105)
+        with patch('MathGame1.time.monotonic', return_value=104.9):
+            self.game.continue_turn(self.ana.token, 1)
+            self.game.expire_continue()
+            self.assertEqual(self.game.continue_remaining_seconds(), 1)
+            self.assertEqual(self.game.state, 'between_turns')
+        with patch.dict(ROOMS, {'TEST': self.game}, clear=True), \
+                patch('MathGame1.time.monotonic', return_value=105), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            expire_games()
+            expire_games()
+        self.assertEqual(self.game.turn, 2)
+        self.assertEqual(self.game.state, 'playing')
+        self.assertEqual(self.game.deadline, 125)
+        self.assertIsNone(self.game.continue_deadline)
+        self.assertEqual(self.game.ready, set())
+
+    def test_late_click_advances_once_and_is_rejected(self):
+        with patch('MathGame1.time.monotonic', return_value=105), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            with self.assertRaises(ValueError):
+                self.game.continue_turn(self.ana.token, 1)
+        self.assertEqual(self.game.turn, 2)
+        self.assertEqual(self.game.state, 'playing')
+
+    def test_all_confirmations_advance_early(self):
+        with patch('MathGame1.time.monotonic', return_value=102), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            self.game.continue_turn(self.ana.token, 1)
+            self.game.continue_turn(self.luis.token, 1)
+        self.assertEqual(self.game.turn, 2)
+        self.assertIsNone(self.game.continue_deadline)
+
+    def test_no_limit_waits_and_invalid_settings_are_rejected(self):
+        self.game.continue_deadline = None
+        self.game.continue_seconds = None
+        with patch('MathGame1.time.monotonic', return_value=10000):
+            self.game.expire_continue()
+        self.assertEqual(self.game.state, 'between_turns')
+        for value in (0, -1, 1.5, True, '10'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                create_game('Ana', continue_seconds=value)
+
+    def test_expiry_after_final_move_displays_results(self):
+        for p in self.game.players:
+            for pos in POSITIONS:
+                if pos not in DOORS:
+                    p.board[pos] = 1
+        with patch('MathGame1.time.monotonic', return_value=105):
+            self.game.expire_continue()
+        self.assertEqual(self.game.state, 'finished')
+        self.assertIsNone(self.game.continue_deadline)
+
+    def test_departure_that_completes_turn_starts_continue_limit(self):
+        game = Game('TEST', continue_seconds=5)
+        players = [game.add_player(name) for name in ('Ana', 'Luis', 'María')]
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            game.start(players[0].token)
+            for p in players[:2]:
+                game.place(p.token, POSITIONS[0], 2, game.turn)
+            game.remove_player(players[2].token)
+        self.assertEqual(game.state, 'between_turns')
+        self.assertEqual(game.continue_deadline, 105)
+
+
+class DisconnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disconnect_waits_and_reconnection_or_other_tab_prevents_removal(self):
+        game = Game('TEST')
+        ana = game.add_player('Ana')
+        game.add_player('Luis')
+        with patch.dict(TOKENS, {p.token: game for p in game.players}, clear=True), \
+                patch.dict(CONNECTIONS, {}, clear=True), patch.dict(DISCONNECT_TASKS, {}, clear=True), \
+                patch('MathGame1.DISCONNECT_GRACE_SECONDS', 0.02):
+            connect_player(game, ana.token, 'first')
+            connect_player(game, ana.token, 'second')
+            disconnect_player(game, ana.token, 'first')
+            self.assertNotIn(ana.token, DISCONNECT_TASKS)
+            disconnect_player(game, ana.token, 'second')
+            await asyncio.sleep(0.005)
+            connect_player(game, ana.token, 'third')
+            await asyncio.sleep(0.03)
+            self.assertIn(ana, game.players)
+            disconnect_player(game, ana.token, 'third')
+            await asyncio.sleep(0.03)
+            self.assertNotIn(ana, game.players)
+            self.assertNotIn(ana.token, TOKENS)
+
+    def test_waiting_host_transfers_and_empty_room_is_removed(self):
+        game = Game('TEST')
+        ana, luis = game.add_player('Ana'), game.add_player('Luis')
+        with patch.dict(ROOMS, {'TEST': game}, clear=True), \
+                patch.dict(TOKENS, {ana.token: game, luis.token: game}, clear=True):
+            game.remove_player(ana.token)
+            self.assertIs(game.players[0], luis)
+            self.assertNotIn(ana.token, TOKENS)
+            game.remove_player(luis.token)
+            self.assertNotIn('TEST', ROOMS)
+
+    def test_departure_unblocks_playing_and_between_turns(self):
+        for state in ('playing', 'between_turns'):
+            with self.subTest(state=state):
+                game = Game('TEST')
+                ana, luis, maria = [game.add_player(name) for name in ('Ana', 'Luis', 'María')]
+                with patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+                    game.start(ana.token)
+                if state == 'playing':
+                    game.place(ana.token, POSITIONS[0], 2, game.turn)
+                    game.place(luis.token, POSITIONS[0], 2, game.turn)
+                    game.remove_player(maria.token)
+                    self.assertEqual(game.state, 'between_turns')
+                else:
+                    for p in game.players:
+                        game.place(p.token, POSITIONS[0], 2, game.turn)
+                    game.continue_turn(ana.token, game.turn)
+                    game.continue_turn(luis.token, game.turn)
+                    with patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+                        game.remove_player(maria.token)
+                    self.assertEqual(game.state, 'playing')
+                    self.assertEqual(game.turn, 2)
+
+    def test_last_remaining_player_finishes_and_is_ranked(self):
+        game = Game('TEST', turn_seconds=10)
+        ana, luis = game.add_player('Ana'), game.add_player('Luis')
+        with patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            game.start(ana.token)
+        game.remove_player(luis.token)
+        self.assertEqual(game.players, [ana])
+        self.assertEqual(game.state, 'finished')
+        self.assertTrue(game.ended_early)
+        self.assertIsNone(game.deadline)
+
+    def test_skull_target_is_reassigned_and_full_target_passes(self):
+        game = Game('TEST')
+        ana, luis, maria = [game.add_player(name) for name in ('Ana', 'Luis', 'María')]
+        for pos in POSITIONS:
+            if pos not in DOORS:
+                maria.board[pos] = 1
+        with patch('MathGame1.RNG.choice', return_value=(2, 3, 6)), \
+                patch('MathGame1.RNG.shuffle'):
+            game.start(ana.token)
+        self.assertEqual(game.targets[ana.token], luis.token)
+        game.remove_player(luis.token)
+        self.assertEqual(game.targets[ana.token], maria.token)
+        self.assertEqual(game.targets[maria.token], ana.token)
+        self.assertIn(ana.token, game.submitted)
+        self.assertNotIn(maria.token, game.submitted)
+        game.place(maria.token, POSITIONS[0], None, game.turn)
+        self.assertEqual(ana.board[POSITIONS[0]], SKULL)
+        self.assertEqual(game.state, 'between_turns')
 
 
 class GameTests(unittest.TestCase):
@@ -536,6 +711,40 @@ class GameTests(unittest.TestCase):
 
 
 class GamePageTests(unittest.TestCase):
+    def test_continue_countdown_updates_without_redrawing(self):
+        game = Game('TEST', continue_seconds=5)
+        ana, luis = game.add_player('Ana'), game.add_player('Luis')
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            game.start(ana.token)
+            game.place(ana.token, POSITIONS[0], 2, game.turn)
+            game.place(luis.token, POSITIONS[0], 2, game.turn)
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        labels = {}
+
+        def make_label(text):
+            label = MagicMock()
+            label.classes.return_value = label
+            labels[text] = label
+            return label
+
+        with patch.dict(TOKENS, {ana.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board, \
+                patch('MathGame1.time.monotonic', return_value=100):
+            ui.refreshable.side_effect = refreshable
+            ui.label.side_effect = make_label
+            game_page(ana.token)
+            label = labels['Continuación automática en 5 s']
+            with patch('MathGame1.time.monotonic', return_value=103):
+                ui.timer.call_args.args[1]()
+            label.set_text.assert_called_once_with('Continuación automática en 2 s')
+            board.assert_not_called()
+
     def test_clock_updates_without_redrawing_board_and_late_choice_expires(self):
         game = Game('TEST', turn_seconds=10)
         ana, luis = game.add_player('Ana'), game.add_player('Luis')
@@ -552,23 +761,66 @@ class GamePageTests(unittest.TestCase):
                 patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board, \
                 patch('MathGame1.time.monotonic', return_value=100):
             ui.refreshable.side_effect = refreshable
-            ui.label.side_effect = lambda text: MagicMock()
+            labels = {}
+
+            def make_label(text):
+                label = MagicMock()
+                label.classes.return_value = label
+                labels[text] = label
+                return label
+
+            ui.label.side_effect = make_label
             game_page(ana.token)
-            ui.label.assert_any_call('Ana: ⏱ 10 s')
-            ui.label.assert_any_call('Luis: ⏱ 10 s')
+            ui.label.assert_any_call('⏱ 10 s')
+            self.assertNotIn('Tu tiempo', labels)
+            clock = labels['⏱ 10 s']
+            clock.set_text.reset_mock()
+            clock.classes.reset_mock()
             update = ui.timer.call_args.args[1]
             choice = next(call.kwargs['on_click'] for call in ui.button.call_args_list
                           if call.args[0] == '2')
+            update()
+            clock.classes.assert_called_with(add=None, remove='clock-warning')
+            with patch('MathGame1.time.monotonic', return_value=101):
+                update()
+            clock.set_text.assert_called_with('⏱ 9 s')
+            clock.classes.assert_called_with(add='clock-warning', remove=None)
             with patch('MathGame1.time.monotonic', return_value=105):
                 update()
             self.assertEqual(board.call_count, 1)
-            ui.label.return_value.set_text.assert_not_called()
+            clock.set_text.assert_called_with('⏱ 5 s')
             with patch('MathGame1.time.monotonic', return_value=110), \
                     patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
                 choice(None)
             self.assertEqual(game.timed_out, {ana.token, luis.token})
             self.assertEqual(game.state, 'between_turns')
-            ui.label.assert_any_call('Ana: Tiempo agotado · jugada automática')
+            ui.label.assert_any_call('Tiempo agotado · jugada automática')
+
+    def test_each_player_sees_only_their_own_clock_and_status(self):
+        game = Game('TEST', turn_seconds=10)
+        ana, luis = game.add_player('Ana'), game.add_player('Luis')
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            game.start(ana.token)
+            game.place(ana.token, POSITIONS[0], 2, game.turn)
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        for player, expected, other in (
+                (ana, 'Turno completado o pasado', '⏱ 10 s'),
+                (luis, '⏱ 10 s', 'Turno completado o pasado')):
+            with self.subTest(player=player.name), \
+                    patch.dict(TOKENS, {player.token: game}, clear=True), \
+                    patch('MathGame1.ui') as ui, patch('MathGame1.draw_board'), \
+                    patch('MathGame1.time.monotonic', return_value=100):
+                ui.refreshable.side_effect = refreshable
+                game_page(player.token)
+                labels = [call.args[0] for call in ui.label.call_args_list]
+                self.assertIn(expected, labels)
+                self.assertNotIn(other, labels)
 
     def test_completed_turn_shows_progress_and_waits_for_each_player(self):
         game = Game('TEST')
