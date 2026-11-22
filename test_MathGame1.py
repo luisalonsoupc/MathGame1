@@ -2,17 +2,35 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from MathGame1 import (DOORS, HEART, KEY, POSITIONS, ROOMS, SKULL, TOKENS, Game, analyze_board,
-                       draw_board, draw_roll, game_page, index, score, score_overlay, skull_overlay)
+                       create_game, draw_board, draw_roll, expire_games, game_page, index, score,
+                       score_overlay, skull_overlay)
 
 
 class IndexTests(unittest.TestCase):
     def test_waiting_games_update_without_recreating_inputs(self):
         buttons = []
+        labels = {}
+        inputs = {}
 
         def make_button(*args, **kwargs):
             button = MagicMock()
             buttons.append(button)
             return button
+
+        def make_label(text):
+            label = MagicMock()
+            label.classes.return_value = label
+            label.set_visibility.return_value = label
+            labels[text] = label
+            return label
+
+        def make_input(text, **kwargs):
+            element = MagicMock()
+            element.classes.return_value = element
+            element.props.return_value = element
+            element.set_visibility.return_value = element
+            inputs[text] = element
+            return element
 
         def refreshable(render):
             wrapped = MagicMock(side_effect=render)
@@ -21,27 +39,49 @@ class IndexTests(unittest.TestCase):
 
         with patch.dict(ROOMS, {}, clear=True), patch('MathGame1.ui') as ui:
             ui.button.side_effect = make_button
+            ui.label.side_effect = make_label
+            ui.input.side_effect = make_input
             ui.refreshable.side_effect = refreshable
             index()
             update = ui.timer.call_args.args[1]
 
             self.assertEqual([call.args[0] for call in ui.button.call_args_list],
-                             ['Crear partida', 'Unirse a la partida'])
+                             ['Crear partida'])
             buttons[0].props.assert_not_called()
-            buttons[1].props.assert_called_once_with('outline')
+            inputs['Código de partida'].set_visibility.assert_called_once_with(False)
+            inputs['Tu nombre'].set_visibility.assert_not_called()
+            for label in labels.values():
+                label.set_visibility.assert_called_once_with(False)
+            inputs['Tu nombre'].value = 'Ana'
+
+            ROOMS['NEW123'] = Game('NEW123')
+            update()
+            ui.label.assert_any_call('Partidas disponibles: NEW123')
+            self.assertEqual([call.args[0] for call in ui.button.call_args_list[-2:]],
+                             ['Unirse a la partida', 'Crear partida'])
+            inputs['Código de partida'].set_visibility.assert_called_with(True)
+            self.assertEqual(inputs['Tu nombre'].value, 'Ana')
+            ROOMS.clear()
+            update()
+
+            ROOMS['PLAYIN'] = Game('PLAYIN', state='playing')
+            update()
+            self.assertEqual([call.args[0] for call in ui.button.call_args_list[-2:]],
+                             ['Crear partida', 'Unirse a la partida'])
+            inputs['Código de partida'].set_visibility.assert_called_with(True)
+            self.assertEqual(inputs['Tu nombre'].value, 'Ana')
 
             ROOMS.update({'Z12345': Game('Z12345'), 'A12345': Game('A12345'),
-                          'PLAYIN': Game('PLAYIN', state='playing'),
                           'FINISH': Game('FINISH', state='finished')})
             update()
             ui.label.assert_any_call('Partidas disponibles: A12345, Z12345')
             self.assertEqual([call.args[0] for call in ui.button.call_args_list[-2:]],
                              ['Unirse a la partida', 'Crear partida'])
-            buttons[2].props.assert_not_called()
-            buttons[3].props.assert_called_once_with('outline')
+            buttons[-2].props.assert_not_called()
+            buttons[-1].props.assert_called_once_with('outline')
 
             update()
-            self.assertEqual(ui.button.call_count, 4)
+            self.assertEqual(ui.button.call_count, 8)
             ROOMS['A12345'].state = 'playing'
             update()
             ui.label.assert_any_call('Partidas disponibles: Z12345')
@@ -49,7 +89,37 @@ class IndexTests(unittest.TestCase):
             update()
             self.assertEqual([call.args[0] for call in ui.button.call_args_list[-2:]],
                              ['Crear partida', 'Unirse a la partida'])
+            ROOMS.clear()
+            update()
+            self.assertEqual(ui.button.call_args.args[0], 'Crear partida')
+            inputs['Código de partida'].set_visibility.assert_called_with(False)
             self.assertEqual(ui.input.call_count, 2)
+
+    def test_creation_dialog_validates_and_applies_optional_time(self):
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(ROOMS, {}, clear=True), patch.dict(TOKENS, {}, clear=True), \
+                patch('MathGame1.ui') as ui:
+            ui.refreshable.side_effect = refreshable
+            ui.input.return_value.classes.return_value.value = 'Ana'
+            checkbox = ui.checkbox.return_value
+            seconds = ui.number.return_value.bind_visibility_from.return_value
+            index()
+            ui.button.call_args.kwargs['on_click']()
+            self.assertEqual(ROOMS, {})
+            confirm = next(call.kwargs['on_click'] for call in ui.button.call_args_list
+                           if call.args[0] == 'Crear')
+            checkbox.value = True
+            seconds.value = 0
+            confirm()
+            self.assertEqual(ROOMS, {})
+            ui.notify.assert_called_once()
+            seconds.value = 12
+            confirm()
+            self.assertEqual(next(iter(ROOMS.values())).turn_seconds, 12)
 
 
 class DiceTests(unittest.TestCase):
@@ -101,6 +171,105 @@ class DiceTests(unittest.TestCase):
                 classes = [call.args[0] for call in ui.element.return_value.classes.call_args_list
                            if call.args[0].startswith('die-face')]
                 self.assertEqual(classes, expected)
+
+
+class TimedGameTests(unittest.TestCase):
+    def setUp(self):
+        self.game = Game('TEST', turn_seconds=10)
+        self.first = self.game.add_player('Ana')
+        self.second = self.game.add_player('Luis')
+
+    def test_creation_defaults_to_unlimited_and_rejects_invalid_limits(self):
+        with patch.dict(ROOMS, {}, clear=True), patch.dict(TOKENS, {}, clear=True):
+                game, _ = create_game('Ana')
+                self.assertIsNone(game.turn_seconds)
+                for value in (0, -1, 1.5, True, '10'):
+                    with self.subTest(value=value), self.assertRaises(ValueError):
+                        create_game('Luis', value)
+                game, _ = create_game('Luis', 10)
+                self.assertEqual(game.turn_seconds, 10)
+
+    def test_deadline_is_exact_and_restart_waits_for_both_players(self):
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                    patch('MathGame1.RNG.choice', side_effect=lambda values: (
+                        (2, 3, 4) if (2, 3, 4) in values else values[0])):
+                self.game.start(self.first.token)
+                self.assertEqual(self.game.deadline, 110)
+                self.assertEqual(self.game.remaining_seconds(), 10)
+                self.game.place(self.first.token, POSITIONS[0], 2, self.game.turn)
+        with patch('MathGame1.time.monotonic', return_value=109.9):
+                self.game.expire_turn()
+                self.assertEqual(self.game.remaining_seconds(), 1)
+                self.assertEqual(self.game.submitted, {self.first.token})
+        with patch('MathGame1.time.monotonic', return_value=110), \
+                    patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
+                self.game.expire_turn()
+                self.game.expire_turn()
+                self.assertEqual(self.game.timed_out, {self.second.token})
+                self.assertEqual(sum(v is not None for v in self.first.board.values()), 1)
+                self.assertEqual(sum(v is not None for v in self.second.board.values()), 1)
+                self.assertIsNone(self.game.deadline)
+                self.assertEqual(self.game.state, 'between_turns')
+                self.game.continue_turn(self.first.token, self.game.turn)
+                self.assertIsNone(self.game.deadline)
+        with patch('MathGame1.time.monotonic', return_value=200), \
+                    patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+                self.game.continue_turn(self.second.token, self.game.turn)
+        self.assertEqual(self.game.deadline, 210)
+        self.assertEqual(self.game.timed_out, set())
+
+    def test_automatic_moves_respect_roll_and_skull_targets(self):
+        for roll in ((2, 3, 4), (6, 2, 3), (2, 6, 4), (2, 3, 6)):
+                with self.subTest(roll=roll):
+                    game = Game('TEST', turn_seconds=5)
+                    ana, luis = game.add_player('Ana'), game.add_player('Luis')
+                    with patch('MathGame1.time.monotonic', return_value=10), \
+                            patch('MathGame1.RNG.choice', return_value=roll):
+                        game.start(ana.token)
+                    expected_choices = game.choices()
+                    with patch('MathGame1.time.monotonic', return_value=15), \
+                            patch('MathGame1.RNG.choice', side_effect=lambda values: values[-1]):
+                        game.expire_turn()
+                    self.assertEqual(game.timed_out, {ana.token, luis.token})
+                    for p in (ana, luis):
+                        board = game.player(game.targets[p.token]).board if roll[2] == 6 else p.board
+                        filled = [(pos, value) for pos, value in board.items() if value is not None]
+                        self.assertEqual(len(filled), 1)
+                        pos, value = filled[0]
+                        self.assertEqual(pos in DOORS, roll[0] == 6 and roll[2] != 6)
+                        if roll[2] == 6:
+                            self.assertEqual(value, SKULL)
+                        else:
+                            self.assertIn(value, expected_choices)
+
+    def test_automatic_move_skips_passed_players_and_works_without_clients(self):
+        for pos in DOORS:
+                self.first.board[pos] = 1
+        with patch('MathGame1.time.monotonic', return_value=10), \
+                    patch('MathGame1.RNG.choice', return_value=(6, 2, 3)):
+                self.game.start(self.first.token)
+        self.assertEqual(self.game.submitted, {self.first.token})
+        with patch.dict(ROOMS, {'TEST': self.game}, clear=True), \
+                    patch('MathGame1.time.monotonic', return_value=20), \
+                    patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
+                expire_games()
+        self.assertEqual(self.game.timed_out, {self.second.token})
+        self.assertEqual(self.game.state, 'between_turns')
+
+    def test_unlimited_game_does_not_expire_and_late_placement_is_rejected(self):
+        self.game.turn_seconds = None
+        with patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+                self.game.start(self.first.token)
+        self.game.expire_turn()
+        self.assertIsNone(self.game.remaining_seconds())
+        self.assertEqual(self.game.submitted, set())
+        self.game.deadline = 10
+        with patch('MathGame1.time.monotonic', return_value=10), \
+                    patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
+                with self.assertRaises(ValueError):
+                    self.game.place(self.first.token, POSITIONS[-1], 2, self.game.turn)
+        self.assertEqual(sum(v is not None for v in self.first.board.values()), 1)
+        self.assertIsNone(self.first.board[POSITIONS[-1]])
 
 
 class GameTests(unittest.TestCase):
@@ -367,6 +536,40 @@ class GameTests(unittest.TestCase):
 
 
 class GamePageTests(unittest.TestCase):
+    def test_clock_updates_without_redrawing_board_and_late_choice_expires(self):
+        game = Game('TEST', turn_seconds=10)
+        ana, luis = game.add_player('Ana'), game.add_player('Luis')
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            game.start(ana.token)
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {ana.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board, \
+                patch('MathGame1.time.monotonic', return_value=100):
+            ui.refreshable.side_effect = refreshable
+            ui.label.side_effect = lambda text: MagicMock()
+            game_page(ana.token)
+            ui.label.assert_any_call('Ana: ⏱ 10 s')
+            ui.label.assert_any_call('Luis: ⏱ 10 s')
+            update = ui.timer.call_args.args[1]
+            choice = next(call.kwargs['on_click'] for call in ui.button.call_args_list
+                          if call.args[0] == '2')
+            with patch('MathGame1.time.monotonic', return_value=105):
+                update()
+            self.assertEqual(board.call_count, 1)
+            ui.label.return_value.set_text.assert_not_called()
+            with patch('MathGame1.time.monotonic', return_value=110), \
+                    patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
+                choice(None)
+            self.assertEqual(game.timed_out, {ana.token, luis.token})
+            self.assertEqual(game.state, 'between_turns')
+            ui.label.assert_any_call('Ana: Tiempo agotado · jugada automática')
+
     def test_completed_turn_shows_progress_and_waits_for_each_player(self):
         game = Game('TEST')
         ana = game.add_player('Ana')
@@ -445,10 +648,14 @@ class GamePageTests(unittest.TestCase):
             ])
             board.assert_not_called()
             buttons = {call.args[0]: call.kwargs['on_click'] for call in ui.button.call_args_list}
+            ui.label.reset_mock()
             buttons['Ver tablero de Luis'](None)
             self.assertIs(board.call_args.args[0], luis.board)
+            ui.label.assert_any_call('-2 puntos (secuencias 0, grupos 0, calaveras -2)')
+            ui.label.reset_mock()
             buttons['Ver tablero de Ana'](None)
             self.assertIs(board.call_args.args[0], ana.board)
+            ui.label.assert_any_call('3 puntos (secuencias 3, grupos 0, calaveras +0)')
             self.assertEqual(ui.dialog.return_value.clear.call_count, 2)
             self.assertEqual(ui.dialog.return_value.open.call_count, 2)
 

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 import os
 import random
 import secrets
 import string
+import time
 from dataclasses import dataclass, field
 from itertools import product
 
-from nicegui import ui
+from nicegui import app, ui
 
 
 Position = tuple[int, int]
@@ -79,6 +82,20 @@ GAME_CSS = '''
     .board-result-cell {
         border-width: 2px;
         border-color: #60766a;
+    }
+    .board-number {
+        font-size: min(max(26px, 8cqw), 48px, 12.5cqw);
+        font-weight: 700;
+        line-height: 1;
+    }
+    .number-choice {
+        height: 36px;
+        min-height: 36px;
+        min-width: 0;
+        padding: 0;
+        font-size: 20px;
+        font-weight: 700;
+        line-height: 1;
     }
     .status-badge {
         max-width: 100%;
@@ -248,6 +265,9 @@ class Game:
     submitted: set[str] = field(default_factory=set)
     ready: set[str] = field(default_factory=set)
     targets: dict[str, str] = field(default_factory=dict)
+    turn_seconds: int | None = None
+    deadline: float | None = None
+    timed_out: set[str] = field(default_factory=set)
 
     def add_player(self, name: str) -> Player:
         name = name.strip()
@@ -276,6 +296,7 @@ class Game:
 
     def next_turn(self) -> None:
         self.ready.clear()
+        self.deadline = None
         if all(all(player.board[pos] is not None for pos in POSITIONS if pos not in DOORS)
                for player in self.players):
             self.state = 'finished'
@@ -296,6 +317,7 @@ class Game:
         self.state = 'playing'
         self.turn += 1
         self.submitted.clear()
+        self.timed_out.clear()
         self.targets.clear()
         if self.roll[2] == 6:
             shuffled = self.players.copy()
@@ -312,6 +334,8 @@ class Game:
                 if not any(player.board[pos] is None for pos in POSITIONS
                            if (pos in DOORS) == is_door_turn)
             )
+        if self.turn_seconds is not None:
+            self.deadline = time.monotonic() + self.turn_seconds
         self.revision += 1
 
     def choices(self) -> list[int]:
@@ -324,6 +348,10 @@ class Game:
                        for mask in range(1, 1 << len(numbers))})
 
     def place(self, token: str, position: Position, number: int | None, turn: int) -> None:
+        self.expire_turn()
+        self._place(token, position, number, turn)
+
+    def _place(self, token: str, position: Position, number: int | None, turn: int) -> None:
         if self.state != 'playing' or self.roll is None or turn != self.turn:
             raise ValueError('El turno ya ha cambiado. Espera la actualización.')
         if token in self.submitted:
@@ -342,6 +370,7 @@ class Game:
         self.revision += 1
         if len(self.submitted) == len(self.players):
             self.state = 'between_turns'
+            self.deadline = None
 
     def continue_turn(self, token: str, turn: int) -> None:
         if self.state != 'between_turns' or turn != self.turn:
@@ -356,6 +385,10 @@ class Game:
             self.next_turn()
 
     def place_random(self, token: str, turn: int) -> tuple[Position, int]:
+        self.expire_turn()
+        return self._place_random(token, turn)
+
+    def _place_random(self, token: str, turn: int) -> tuple[Position, int]:
         if self.state != 'playing' or self.roll is None or turn != self.turn:
             raise ValueError('El turno ya ha cambiado. Espera la actualización.')
         if token in self.submitted:
@@ -367,19 +400,59 @@ class Game:
             raise ValueError('No hay números o casillas disponibles en este turno.')
         number = RNG.choice(choices)
         position = RNG.choice(positions)
-        self.place(token, position, number, turn)
+        self._place(token, position, number, turn)
         return position, number
 
+    def remaining_seconds(self) -> int | None:
+        if self.deadline is None:
+            return None
+        return max(0, math.ceil(self.deadline - time.monotonic()))
 
-def create_game(name: str) -> tuple[Game, Player]:
+    def expire_turn(self) -> None:
+        if self.state != 'playing' or self.deadline is None or time.monotonic() < self.deadline:
+            return
+        assert self.roll is not None
+        skull = self.roll[2] == 6
+        for player in self.players:
+            if player.token in self.submitted:
+                continue
+            if skull:
+                target = self.player(self.targets[player.token])
+                positions = [pos for pos, value in target.board.items() if value is None and pos not in DOORS]
+                if not positions:
+                    raise ValueError('No hay casillas disponibles para colocar la calavera.')
+                self._place(player.token, RNG.choice(positions), None, self.turn)
+            else:
+                self._place_random(player.token, self.turn)
+            self.timed_out.add(player.token)
+
+
+def create_game(name: str, turn_seconds: int | None = None) -> tuple[Game, Player]:
+    if turn_seconds is not None and (isinstance(turn_seconds, bool) or
+                                     not isinstance(turn_seconds, int) or turn_seconds < 1):
+        raise ValueError('El tiempo por turno debe ser un número entero de segundos mayor que cero.')
     while True:
         code = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
         if code not in ROOMS:
             break
-    game = Game(code)
+    game = Game(code, turn_seconds=turn_seconds)
     player = game.add_player(name)
     ROOMS[code] = game
     return game, player
+
+
+def expire_games() -> None:
+    for game in tuple(ROOMS.values()):
+        game.expire_turn()
+
+
+async def expiration_loop() -> None:
+    while True:
+        expire_games()
+        await asyncio.sleep(0.2)
+
+
+app.on_startup(expiration_loop)
 
 
 def draw_roll(roll: tuple[int, int, int]) -> None:
@@ -417,19 +490,41 @@ def notice(error: ValueError) -> None:
 def index() -> None:
     ui.page_title('MathGame1')
     ui.add_css(GAME_CSS)
-    with ui.column().classes('w-full max-w-lg mx-auto p-4 gap-4'):
-        ui.label('MathGame1').classes('text-3xl font-bold')
-        ui.label('Crea una partida o únete con el código que te hayan compartido.')
+    with ui.column().classes('w-full max-w-lg mx-auto p-4 gap-4') as page:
+        has_rooms = bool(ROOMS)
+        title = ui.label('MathGame1').classes('text-3xl font-bold').set_visibility(has_rooms)
+        description = ui.label('Crea una partida o únete con el código que te hayan compartido.').set_visibility(has_rooms)
         name = ui.input('Tu nombre', validation={'Máximo 30 caracteres': lambda v: len(v or '') <= 30}).classes('w-full')
-        code = ui.input('Código de partida').props('maxlength=6').classes('w-full')
+        code = ui.input('Código de partida').props('maxlength=6').classes('w-full').set_visibility(has_rooms)
 
         def create() -> None:
-            try:
-                _, player = create_game(name.value or '')
-            except ValueError as error:
-                notice(error)
-                return
-            ui.navigate.to(f'/partida?token={player.token}')
+            with page, ui.dialog() as dialog, ui.card().classes('w-full max-w-sm'):
+                ui.label('Crear partida').classes('text-xl font-bold')
+                timed = ui.checkbox('Limitar el tiempo de cada turno', value=False)
+                seconds = ui.number('Segundos por turno', value=30, min=1, step=1,
+                                    precision=0).bind_visibility_from(timed, 'value')
+
+                def confirm() -> None:
+                    turn_seconds = None
+                    if timed.value:
+                        value = seconds.value
+                        if value is None or not math.isfinite(value) or value < 1 or not float(value).is_integer():
+                            notice(ValueError('El tiempo por turno debe ser un número entero de segundos mayor que cero.'))
+                            return
+                        turn_seconds = int(value)
+                    try:
+                        _, player = create_game(name.value or '', turn_seconds)
+                    except ValueError as error:
+                        notice(error)
+                        return
+                    dialog.close()
+                    ui.navigate.to(f'/partida?token={player.token}')
+
+                with ui.row():
+                    ui.button('Crear', on_click=confirm)
+                    ui.button('Cancelar', on_click=dialog.close).props('outline')
+            dialog.on('hide', lambda: dialog.delete())
+            dialog.open()
 
         def join() -> None:
             game = ROOMS.get((code.value or '').strip().upper())
@@ -444,30 +539,34 @@ def index() -> None:
             ui.navigate.to(f'/partida?token={player.token}')
 
         @ui.refreshable
-        def available_games(codes: tuple[str, ...]) -> None:
+        def available_games(codes: tuple[str, ...], has_rooms: bool) -> None:
             if codes:
                 ui.label('Partidas disponibles: ' + ', '.join(codes))
                 ui.button('Unirse a la partida', on_click=join).classes('w-full')
                 ui.button('Crear partida', on_click=create).props('outline').classes('w-full')
             else:
                 ui.button('Crear partida', on_click=create).classes('w-full')
-                ui.button('Unirse a la partida', on_click=join).props('outline').classes('w-full')
+                if has_rooms:
+                    ui.button('Unirse a la partida', on_click=join).props('outline').classes('w-full')
 
         def waiting_codes() -> tuple[str, ...]:
             return tuple(sorted(game.code for game in ROOMS.values() if game.state == 'waiting'))
 
-        seen_codes = waiting_codes()
-        available_games(seen_codes)
+        seen_state = (waiting_codes(), has_rooms)
+        available_games(*seen_state)
+        footer = ui.label('Cada persona juega desde su propio dispositivo.').classes(
+            'text-sm text-grey-7').set_visibility(has_rooms)
 
         def update_available_games() -> None:
-            nonlocal seen_codes
-            codes = waiting_codes()
-            if codes != seen_codes:
-                seen_codes = codes
-                available_games.refresh(codes)
+            nonlocal seen_state
+            state = (waiting_codes(), bool(ROOMS))
+            if state != seen_state:
+                seen_state = state
+                for element in (title, description, code, footer):
+                    element.set_visibility(state[1])
+                available_games.refresh(*state)
 
         ui.timer(0.7, update_available_games)
-        ui.label('Cada persona juega desde su propio dispositivo.').classes('text-sm text-grey-7')
 
 
 @ui.page('/partida')
@@ -482,15 +581,30 @@ def game_page(token: str = '') -> None:
     ui.page_title('MathGame1 - partida')
     selected: dict[str, int | None] = {'number': None, 'turn': None}
     seen = {'revision': -1}
+    clock_labels: dict[str, ui.label] = {}
+
+    def clock_text(p: Player, remaining: int | None) -> str:
+        if p.token in game.timed_out:
+            status = 'Tiempo agotado · jugada automática'
+        elif p.token in game.submitted:
+            status = 'Turno completado o pasado'
+        elif remaining is not None:
+            status = f'⏱ {remaining} s'
+        else:
+            status = 'Esperando'
+        return f'{p.name}: {status}'
 
     @ui.refreshable
     def content() -> None:
+        clock_labels.clear()
         with ui.column().classes('w-full max-w-xl mx-auto p-3 gap-3'):
             ui.label(f'Partida {game.code}').classes('text-2xl font-bold')
             ui.label(f'Jugador: {player.name}').classes('status-badge status-player')
             if game.state == 'waiting':
                 ui.label('Comparte el código de partida. No compartas la dirección de esta página.')
                 ui.label('Jugadores: ' + ', '.join(p.name for p in game.players))
+                if game.turn_seconds is not None:
+                    ui.label(f'Tiempo por turno: {game.turn_seconds} segundos')
                 if player is game.players[0]:
                     def start() -> None:
                         try:
@@ -510,10 +624,16 @@ def game_page(token: str = '') -> None:
                 ui.label('Clasificación').classes('text-lg font-bold')
                 board_dialog = ui.dialog()
 
+                def format_result(analysis: BoardAnalysis) -> str:
+                    result = analysis.scores
+                    return (f"{result['total']} puntos (secuencias {result['secuencias']}, "
+                            f"grupos {result['grupos']}, calaveras {result['calaveras']:+})")
+
                 def show_board(p: Player, analysis: BoardAnalysis) -> None:
                     board_dialog.clear()
                     with board_dialog, ui.card().classes('w-full max-w-xl'):
                         ui.label(f'Tablero de {p.name}').classes('text-lg font-bold')
+                        ui.label(format_result(analysis)).classes('font-bold')
                         ui.label('Línea verde: secuencia puntuable; gris discontinua: secuencia menor '
                                  'de al menos 3 casillas. Fondo de color: grupo; verde: calavera positiva; '
                                  'cruz roja: negativa.').classes('text-sm')
@@ -528,9 +648,7 @@ def game_page(token: str = '') -> None:
                     if result['total'] != previous_total:
                         rank = index
                         previous_total = result['total']
-                    ui.label(f"{rank}. {p.name}: {result['total']} puntos "
-                             f"(secuencias {result['secuencias']}, grupos {result['grupos']}, "
-                             f"calaveras {result['calaveras']:+})").classes('font-bold')
+                    ui.label(f'{rank}. {p.name}: {format_result(analysis)}').classes('font-bold')
                     ui.button(f'Ver tablero de {p.name}',
                               on_click=lambda e, player=p, result=analysis: show_board(player, result)).props('outline')
                 ui.link('Nueva partida', '/')
@@ -544,6 +662,12 @@ def game_page(token: str = '') -> None:
             ui.label(f'Jugadores que han terminado el turno: {len(game.submitted)}/{len(game.players)}')
             ui.linear_progress(value=len(game.submitted) / len(game.players),
                                size='12px', show_value=False).props('rounded').classes('w-full')
+            if game.turn_seconds is not None:
+                remaining = game.remaining_seconds()
+                with ui.column().classes('status-badge status-turn w-full gap-1'):
+                    ui.label('Tiempo de los jugadores').classes('font-bold')
+                    for p in game.players:
+                        clock_labels[p.token] = ui.label(clock_text(p, remaining)).classes('font-bold')
             if game.state == 'between_turns':
                 ui.label('Turno completado. Pulsa para continuar.').classes('text-xl font-bold')
                 ui.label(f'Jugadores preparados: {len(game.ready)}/{len(game.players)}')
@@ -579,6 +703,7 @@ def game_page(token: str = '') -> None:
             current_turn = game.turn
 
             def choose(number: int) -> None:
+                game.expire_turn()
                 if game.state != 'playing' or game.turn != current_turn or token in game.submitted:
                     notice(ValueError('El turno ya ha cambiado o ya has jugado.'))
                     update()
@@ -599,7 +724,8 @@ def game_page(token: str = '') -> None:
             if not skull:
                 with ui.element('div').classes('grid grid-cols-5 gap-2 w-full'):
                     for number in range(1, 16):
-                        button = ui.button(str(number), on_click=lambda e, n=number: choose(n)).classes('w-full')
+                        button = ui.button(str(number), on_click=lambda e, n=number: choose(n)).classes(
+                            'number-choice w-full')
                         if number != selected['number']:
                             button.props('outline')
 
@@ -617,6 +743,12 @@ def game_page(token: str = '') -> None:
         if seen['revision'] != game.revision:
             seen['revision'] = game.revision
             content.refresh()
+        if clock_labels:
+            remaining = game.remaining_seconds()
+            for p in game.players:
+                label = clock_labels.get(p.token)
+                if label is not None:
+                    label.set_text(clock_text(p, remaining))
 
     content()
     seen['revision'] = game.revision
@@ -699,6 +831,8 @@ def draw_board(board: dict[Position, Cell], on_place, doors_only: bool = False,
                         text = ui.label(label).classes('relative z-20')
                         if (value is None and door) or value == SKULL:
                             text.style('font-size: calc(100cqw / 6 * 0.8); line-height: 1')
+                        elif isinstance(value, int):
+                            text.classes('board-number')
                     continue
                 enabled = on_place is not None and value is None and door == doors_only
                 button = ui.button(label, on_click=lambda e, p=position: on_place(p)).classes(
@@ -708,6 +842,8 @@ def draw_board(board: dict[Position, Cell], on_place, doors_only: bool = False,
                     button.props('color=white')
                 if (value is None and door) or value == SKULL:
                     button.style('font-size: calc(100cqw / 6 * 0.8); line-height: 1')
+                elif isinstance(value, int):
+                    button.classes('board-number')
                 if not enabled:
                     button.disable()
         if analysis is not None:

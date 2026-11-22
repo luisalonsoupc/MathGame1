@@ -5,6 +5,8 @@ los demás se unen con su propio nombre. El creador inicia la partida cuando tod
 están presentes. Se necesitan al menos dos jugadores.
 La pantalla inicial muestra los códigos de las partidas que todavía no han
 empezado y destaca la opción de unirse mientras haya alguna disponible.
+Si aún no se ha creado ninguna partida, solo muestra el nombre y la opción de
+crear una.
 
 ## Ejecutar
 
@@ -33,6 +35,13 @@ identifica al jugador: no la compartas; comparte solo el código.
   jugador debe pulsar «Continuar» antes de comenzar el siguiente turno o ver
   los resultados finales. Un jugador sin casillas libres del tipo de la tirada
   pasa, pero puede seguir colocando calaveras en tableros ajenos.
+- Al crear una partida se puede activar un límite de segundos por turno; por
+  defecto no hay límite. Todos los jugadores comparten la cuenta atrás, que
+  comienza cuando todos han confirmado el inicio del turno. Al agotarse, el
+  servidor juega por quienes aún no lo han hecho: elige al azar un número
+  válido y una casilla válida vacía, o coloca una calavera en una casilla
+  válida aleatoria del tablero asignado. La espera de las confirmaciones no
+  tiene límite de tiempo.
 - La llave obliga a usar una puerta y prevalece sobre el corazón. El corazón
   permite escoger del 1 al 15 si no hay llave. La calavera prevalece sobre
   ambos y asigna aleatoriamente a cada jugador el tablero de otra persona,
@@ -50,9 +59,10 @@ identifica al jugador: no la compartas; comparte solo el código.
   uno. Solo puntúa la secuencia más larga, con un punto por cada casilla;
   una casilla aislada no puntúa. La adyacencia incluye horizontal, vertical
   y diagonal. Al finalizar se muestra la clasificación con el desglose de
-  puntos y un botón para consultar el tablero de cada jugador. En esos tableros
-  se muestra en verde la secuencia puntuable y con líneas grises discontinuas
-  las secuencias completas más cortas de al menos tres casillas.
+  puntos y un botón para consultar el tablero de cada jugador, junto con su
+  puntuación total y desglosada. En esos tableros se muestra en verde la
+  secuencia puntuable y con líneas grises discontinuas las secuencias completas
+  más cortas de al menos tres casillas.
 - Cada valor con al menos un grupo conectado de tres o más casillas iguales
   aporta tres puntos, una sola vez por valor. Cada calavera aporta dos puntos
   si tiene un 9 adyacente, y resta dos en caso contrario. Los empates se
