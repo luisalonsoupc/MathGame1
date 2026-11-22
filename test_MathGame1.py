@@ -360,6 +360,20 @@ class ContinueTimeoutTests(unittest.TestCase):
         self.assertEqual(game.state, 'between_turns')
         self.assertEqual(game.continue_deadline, 105)
 
+    def test_expired_playing_turn_starts_separate_continue_limit(self):
+        game = Game('TEST', turn_seconds=10, continue_seconds=5)
+        ana, luis = game.add_player('Ana'), game.add_player('Luis')
+        with patch('MathGame1.time.monotonic', return_value=100), \
+                patch('MathGame1.RNG.choice', return_value=(2, 3, 4)):
+            game.start(ana.token)
+        with patch.dict(ROOMS, {'TEST': game}, clear=True), \
+                patch('MathGame1.time.monotonic', return_value=110), \
+                patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
+            expire_games()
+        self.assertEqual(game.timed_out, {ana.token, luis.token})
+        self.assertEqual(game.continue_deadline, 115)
+        self.assertEqual(game.state, 'between_turns')
+
 
 class DisconnectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_disconnect_waits_and_reconnection_or_other_tab_prevents_removal(self):
@@ -711,6 +725,18 @@ class GameTests(unittest.TestCase):
 
 
 class GamePageTests(unittest.TestCase):
+    def test_nicegui_2_disconnect_handler_does_not_depend_on_stale_tab_id(self):
+        game = Game('TEST')
+        player = game.add_player('Ana')
+        with patch.dict(TOKENS, {player.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.nicegui_version', '2.0.0'), \
+                patch('MathGame1.disconnect_player') as disconnect:
+            ui.refreshable.side_effect = lambda render: render
+            ui.context.client.has_socket_connection = True
+            game_page(player.token)
+            ui.context.client.on_disconnect.call_args.args[0]()
+            disconnect.assert_called_once_with(game, player.token, ui.context.client.id)
+
     def test_continue_countdown_updates_without_redrawing(self):
         game = Game('TEST', continue_seconds=5)
         ana, luis = game.add_player('Ana'), game.add_player('Luis')
