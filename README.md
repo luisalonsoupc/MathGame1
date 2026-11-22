@@ -49,9 +49,9 @@ un jugador, la partida termina y se muestran sus resultados.
   servidor juega por quienes aún no lo han hecho: elige al azar un número
   válido y una casilla válida vacía, o coloca una calavera en una casilla
   válida aleatoria del tablero asignado.
-- La llave obliga a usar una puerta y prevalece sobre el corazón. El corazón
-  permite escoger del 1 al 15 si no hay llave. La calavera prevalece sobre
-  ambos y asigna aleatoriamente a cada jugador el tablero de otra persona,
+- La llave obliga a usar una puerta. El corazón permite escoger del 1 al 15,
+  también cuando sale junto con la llave; en ese caso se usa una puerta.
+  La calavera prevalece sobre ambos y asigna aleatoriamente a cada jugador el tablero de otra persona,
   sin mostrar su identidad; ese tablero tiene un fondo oscuro para distinguirlo.
   Si el tablero asignado no tiene casillas normales libres, ese jugador pasa.
 - Los tres dados muestran puntos para los valores numéricos y su símbolo

@@ -459,7 +459,7 @@ class Game:
     def choices(self) -> list[int]:
         if self.roll is None or self.roll[2] == 6:
             return []
-        if self.roll[1] == 6 and self.roll[0] != 6:
+        if self.roll[1] == 6:
             return list(range(1, 16))
         numbers = [die for die in self.roll if die != 6]
         return sorted({sum(numbers[index] for index in range(len(numbers)) if mask & (1 << index))

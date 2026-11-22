@@ -231,7 +231,7 @@ class TimedGameTests(unittest.TestCase):
         self.assertEqual(self.game.timed_out, set())
 
     def test_automatic_moves_respect_roll_and_skull_targets(self):
-        for roll in ((2, 3, 4), (6, 2, 3), (2, 6, 4), (2, 3, 6)):
+        for roll in ((2, 3, 4), (6, 2, 3), (2, 6, 4), (6, 6, 4), (2, 3, 6)):
                 with self.subTest(roll=roll):
                     game = Game('TEST', turn_seconds=5)
                     ana, luis = game.add_player('Ana'), game.add_player('Luis')
@@ -251,6 +251,8 @@ class TimedGameTests(unittest.TestCase):
                         self.assertEqual(pos in DOORS, roll[0] == 6 and roll[2] != 6)
                         if roll[2] == 6:
                             self.assertEqual(value, SKULL)
+                        elif roll == (6, 6, 4):
+                            self.assertEqual(value, 15)
                         else:
                             self.assertIn(value, expected_choices)
 
@@ -476,12 +478,29 @@ class GameTests(unittest.TestCase):
     def test_choices_and_special_dice(self):
         self.game.roll = (2, 3, 4)
         self.assertEqual(self.game.choices(), [2, 3, 4, 5, 6, 7, 9])
-        self.game.roll = (6, 6, 4)
-        self.assertEqual(self.game.choices(), [4])
+        for die in range(1, 6):
+            self.game.roll = (6, 6, die)
+            self.assertEqual(self.game.choices(), list(range(1, 16)))
         self.game.roll = (2, 6, 4)
         self.assertEqual(self.game.choices(), list(range(1, 16)))
         self.game.roll = (6, 6, 6)
         self.assertEqual(self.game.choices(), [])
+
+    def test_key_and_heart_require_a_door_and_allow_any_number(self):
+        self.game.state = 'playing'
+        self.game.roll = (6, 6, 4)
+        self.game.turn = 1
+        door = next(iter(DOORS))
+        normal = next(pos for pos in POSITIONS if pos not in DOORS)
+        for number in (0, 16):
+            with self.subTest(number=number), self.assertRaises(ValueError):
+                self.game.place(self.first.token, door, number, self.game.turn)
+        with self.assertRaises(ValueError):
+            self.game.place(self.first.token, normal, 15, self.game.turn)
+        self.game.place(self.first.token, door, 15, self.game.turn)
+        self.game.place(self.second.token, door, 1, self.game.turn)
+        self.assertEqual(self.first.board[door], 15)
+        self.assertEqual(self.second.board[door], 1)
 
     def test_incorrect_number_uses_valid_random_number_and_empty_matching_cell(self):
         for roll, door in [((2, 3, 4), False), ((6, 2, 3), True)]:
@@ -1046,6 +1065,31 @@ class GamePageTests(unittest.TestCase):
             game.revision += 1
             ui.timer.call_args.args[1]()
             self.assertIsNone(board.call_args.args[1])
+
+    def test_key_and_heart_selects_number_before_door(self):
+        game = Game('TEST')
+        player = game.add_player('Ana')
+        game.add_player('Luis')
+        game.state = 'playing'
+        game.roll = (6, 6, 4)
+        game.turn = 1
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {player.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board:
+            ui.refreshable.side_effect = refreshable
+            game_page(player.token)
+            ui.button.call_args_list[-1].kwargs['on_click'](None)
+            self.assertEqual(game.submitted, set())
+            self.assertTrue(board.call_args.kwargs['doors_only'])
+            door = next(iter(DOORS))
+            board.call_args.args[1](door)
+            self.assertEqual(player.board[door], 15)
+            ui.notify.assert_not_called()
 
 
 if __name__ == '__main__':
