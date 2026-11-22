@@ -3,6 +3,8 @@
 Juego multijugador para móviles. Una persona crea la partida y comparte el código;
 los demás se unen con su propio nombre. El creador inicia la partida cuando todos
 están presentes. Se necesitan al menos dos jugadores.
+La pantalla inicial muestra los códigos de las partidas que todavía no han
+empezado y destaca la opción de unirse mientras haya alguna disponible.
 
 ## Ejecutar
 
@@ -27,20 +29,30 @@ identifica al jugador: no la compartas; comparte solo el código.
 
 - La partida termina cuando todos los tableros tienen ocupadas sus casillas
   sin puerta, aunque queden puertas vacías.
-- Todos juegan una vez por turno; el siguiente comienza cuando todos han
-  actuado o pasado. Un jugador sin casillas libres del tipo de la tirada pasa,
-  pero puede seguir colocando calaveras en tableros ajenos.
+- Todos juegan una vez por turno. Cuando todos han actuado o pasado, cada
+  jugador debe pulsar «Continuar» antes de comenzar el siguiente turno o ver
+  los resultados finales. Un jugador sin casillas libres del tipo de la tirada
+  pasa, pero puede seguir colocando calaveras en tableros ajenos.
 - La llave obliga a usar una puerta y prevalece sobre el corazón. El corazón
   permite escoger del 1 al 15 si no hay llave. La calavera prevalece sobre
   ambos y asigna aleatoriamente a cada jugador el tablero de otra persona,
-  sin mostrar su identidad. Si el tablero asignado no tiene casillas normales
-  libres, ese jugador pasa.
+  sin mostrar su identidad; ese tablero tiene un fondo oscuro para distinguirlo.
+  Si el tablero asignado no tiene casillas normales libres, ese jugador pasa.
+- Los tres dados muestran puntos para los valores numéricos y su símbolo
+  correspondiente cuando aparece una llave, un corazón o una calavera. Al
+  salir una calavera, los otros dos dados se tachan porque no se aplican.
 - Se repite una tirada normal o con llave si ningún jugador puede usarla.
+- En las tiradas numéricas, cada jugador calcula un número válido y lo elige
+  entre los botones del 1 al 15 antes de seleccionar una casilla. Si se
+  equivoca, se coloca un número válido al azar en una casilla válida vacía,
+  también elegida al azar.
 - Una secuencia es un camino de números adyacentes que aumenta de uno en
   uno. Solo puntúa la secuencia más larga, con un punto por cada casilla;
   una casilla aislada no puntúa. La adyacencia incluye horizontal, vertical
-  y diagonal. En los tableros finales se muestra en verde la secuencia
-  puntuable y en gris las demás conexiones entre números consecutivos.
+  y diagonal. Al finalizar se muestra la clasificación con el desglose de
+  puntos y un botón para consultar el tablero de cada jugador. En esos tableros
+  se muestra en verde la secuencia puntuable y con líneas grises discontinuas
+  las secuencias completas más cortas de al menos tres casillas.
 - Cada valor con al menos un grupo conectado de tres o más casillas iguales
   aporta tres puntos, una sola vez por valor. Cada calavera aporta dos puntos
   si tiene un 9 adyacente, y resta dos en caso contrario. Los empates se

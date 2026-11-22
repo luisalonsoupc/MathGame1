@@ -1,7 +1,106 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from MathGame1 import DOORS, POSITIONS, SKULL, Game, analyze_board, score, score_overlay
+from MathGame1 import (DOORS, HEART, KEY, POSITIONS, ROOMS, SKULL, TOKENS, Game, analyze_board,
+                       draw_board, draw_roll, game_page, index, score, score_overlay, skull_overlay)
+
+
+class IndexTests(unittest.TestCase):
+    def test_waiting_games_update_without_recreating_inputs(self):
+        buttons = []
+
+        def make_button(*args, **kwargs):
+            button = MagicMock()
+            buttons.append(button)
+            return button
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(ROOMS, {}, clear=True), patch('MathGame1.ui') as ui:
+            ui.button.side_effect = make_button
+            ui.refreshable.side_effect = refreshable
+            index()
+            update = ui.timer.call_args.args[1]
+
+            self.assertEqual([call.args[0] for call in ui.button.call_args_list],
+                             ['Crear partida', 'Unirse a la partida'])
+            buttons[0].props.assert_not_called()
+            buttons[1].props.assert_called_once_with('outline')
+
+            ROOMS.update({'Z12345': Game('Z12345'), 'A12345': Game('A12345'),
+                          'PLAYIN': Game('PLAYIN', state='playing'),
+                          'FINISH': Game('FINISH', state='finished')})
+            update()
+            ui.label.assert_any_call('Partidas disponibles: A12345, Z12345')
+            self.assertEqual([call.args[0] for call in ui.button.call_args_list[-2:]],
+                             ['Unirse a la partida', 'Crear partida'])
+            buttons[2].props.assert_not_called()
+            buttons[3].props.assert_called_once_with('outline')
+
+            update()
+            self.assertEqual(ui.button.call_count, 4)
+            ROOMS['A12345'].state = 'playing'
+            update()
+            ui.label.assert_any_call('Partidas disponibles: Z12345')
+            ROOMS['Z12345'].state = 'playing'
+            update()
+            self.assertEqual([call.args[0] for call in ui.button.call_args_list[-2:]],
+                             ['Crear partida', 'Unirse a la partida'])
+            self.assertEqual(ui.input.call_count, 2)
+
+
+class DiceTests(unittest.TestCase):
+    def test_numeric_faces_show_correct_pips_and_accessible_values(self):
+        elements = []
+
+        def element(tag):
+            item = MagicMock()
+            item.classes.return_value = item
+            item.props.return_value = item
+            elements.append(item)
+            return item
+
+        with patch('MathGame1.ui') as ui:
+            ui.element.side_effect = element
+            draw_roll((1, 2, 5))
+
+        faces = [item for item in elements if item.classes.call_args.args[0] == 'die-face']
+        self.assertEqual([item.props.call_args.args[0] for item in faces], [
+            'role=img aria-label="Dado 1: 1"',
+            'role=img aria-label="Dado 2: 2"',
+            'role=img aria-label="Dado 3: 5"',
+        ])
+        pips = [item.style.call_args.args[0] for item in elements
+                if item.classes.call_args.args[0] == 'die-pip']
+        self.assertEqual(pips, [
+            'grid-area: 2 / 2',
+            'grid-area: 1 / 1', 'grid-area: 3 / 3',
+            'grid-area: 1 / 1', 'grid-area: 1 / 3', 'grid-area: 2 / 2',
+            'grid-area: 3 / 1', 'grid-area: 3 / 3',
+        ])
+
+    def test_special_faces_show_the_right_symbols(self):
+        with patch('MathGame1.ui') as ui:
+            draw_roll((6, 6, 6))
+            self.assertEqual([call.args[0] for call in ui.label.call_args_list], [KEY, HEART, SKULL])
+            props = [call.args[0] for call in ui.element.return_value.classes.return_value.props.call_args_list]
+            self.assertEqual(props, ['role=img aria-label="Dado 1: llave, no se aplica"',
+                                     'role=img aria-label="Dado 2: corazón, no se aplica"',
+                                     'role=img aria-label="Dado 3: calavera"'])
+            classes = [call.args[0] for call in ui.element.return_value.classes.call_args_list]
+            self.assertEqual(classes, ['die-face ignored', 'die-face ignored', 'die-face'])
+
+    def test_numeric_dice_are_crossed_only_when_skull_is_rolled(self):
+        for roll, expected in [((2, 3, 6), ['die-face ignored', 'die-face ignored', 'die-face']),
+                               ((2, 6, 4), ['die-face', 'die-face', 'die-face'])]:
+            with self.subTest(roll=roll), patch('MathGame1.ui') as ui:
+                draw_roll(roll)
+                classes = [call.args[0] for call in ui.element.return_value.classes.call_args_list
+                           if call.args[0].startswith('die-face')]
+                self.assertEqual(classes, expected)
 
 
 class GameTests(unittest.TestCase):
@@ -26,6 +125,39 @@ class GameTests(unittest.TestCase):
         self.game.roll = (6, 6, 6)
         self.assertEqual(self.game.choices(), [])
 
+    def test_incorrect_number_uses_valid_random_number_and_empty_matching_cell(self):
+        for roll, door in [((2, 3, 4), False), ((6, 2, 3), True)]:
+            with self.subTest(roll=roll):
+                self.game.state = 'playing'
+                self.game.roll = roll
+                self.game.turn += 1
+                self.game.submitted.clear()
+                positions = [pos for pos in POSITIONS if (pos in DOORS) == door]
+                self.first.board[positions[0]] = 10
+                with patch('MathGame1.RNG.choice', side_effect=lambda values: values[-1]) as choose:
+                    position, number = self.game.place_random(self.first.token, self.game.turn)
+                self.assertEqual(choose.call_args_list[0].args[0], self.game.choices())
+                self.assertNotIn(positions[0], choose.call_args_list[1].args[0])
+                self.assertTrue(all((pos in DOORS) == door for pos in choose.call_args_list[1].args[0]))
+                self.assertEqual(self.first.board[position], number)
+                self.assertIn(self.first.token, self.game.submitted)
+
+    def test_random_placement_rejects_stale_submitted_and_skull_turns(self):
+        self.game.state = 'playing'
+        self.game.roll = (2, 3, 4)
+        self.game.turn = 2
+        with patch('MathGame1.RNG.choice') as choose:
+            with self.assertRaises(ValueError):
+                self.game.place_random(self.first.token, 1)
+            self.game.submitted.add(self.first.token)
+            with self.assertRaises(ValueError):
+                self.game.place_random(self.first.token, 2)
+            self.game.submitted.clear()
+            self.game.roll = (2, 3, 6)
+            with self.assertRaises(ValueError):
+                self.game.place_random(self.first.token, 2)
+            choose.assert_not_called()
+
     def test_placement_validation_and_turn_barrier(self):
         with patch('MathGame1.RNG.choice', return_value=(6, 2, 3)):
             self.game.start(self.first.token)
@@ -40,9 +172,22 @@ class GameTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.game.place(self.first.token, door, 5, turn)
         self.assertEqual(self.game.turn, turn)
+        self.game.place(self.second.token, door, 2, turn)
+        self.assertEqual(self.game.state, 'between_turns')
+        self.assertEqual(self.game.turn, turn)
+        self.game.continue_turn(self.first.token, turn)
+        self.assertEqual(self.game.state, 'between_turns')
+        with self.assertRaises(ValueError):
+            self.game.continue_turn(self.first.token, turn)
+        with self.assertRaises(ValueError):
+            self.game.continue_turn('invalid-token', turn)
+        with self.assertRaises(ValueError):
+            self.game.continue_turn(self.second.token, turn + 1)
         with patch('MathGame1.RNG.choice', return_value=(1, 2, 3)):
-            self.game.place(self.second.token, door, 2, turn)
+            self.game.continue_turn(self.second.token, turn)
         self.assertEqual(self.game.turn, turn + 1)
+        self.assertEqual(self.game.state, 'playing')
+        self.assertEqual(self.game.ready, set())
         with self.assertRaises(ValueError):
             self.game.place(self.first.token, normal, 1, turn)
 
@@ -74,17 +219,21 @@ class GameTests(unittest.TestCase):
     def test_complete_game(self):
         with patch('MathGame1.RNG.choice', return_value=(1, 1, 1)):
             self.game.start(self.first.token)
-        while self.game.state == 'playing':
-            turn = self.game.turn
-            for player in self.game.players:
-                if player.token in self.game.submitted:
+            while self.game.state != 'finished':
+                turn = self.game.turn
+                if self.game.state == 'between_turns':
+                    for player in self.game.players:
+                        self.game.continue_turn(player.token, turn)
                     continue
-                roll = self.game.roll
-                skull = roll[2] == 6
-                target = self.game.player(self.game.targets[player.token]) if skull else player
-                door = not skull and roll[0] == 6
-                pos = next(pos for pos in POSITIONS if (pos in DOORS) == door and target.board[pos] is None)
-                self.game.place(player.token, pos, None if skull else self.game.choices()[0], turn)
+                for player in self.game.players:
+                    if player.token in self.game.submitted:
+                        continue
+                    roll = self.game.roll
+                    skull = roll[2] == 6
+                    target = self.game.player(self.game.targets[player.token]) if skull else player
+                    door = not skull and roll[0] == 6
+                    pos = next(pos for pos in POSITIONS if (pos in DOORS) == door and target.board[pos] is None)
+                    self.game.place(player.token, pos, None if skull else self.game.choices()[0], turn)
         self.assertTrue(all(all(p.board[pos] is not None for pos in POSITIONS if pos not in DOORS)
                             for p in self.game.players))
 
@@ -127,6 +276,10 @@ class GameTests(unittest.TestCase):
             self.game.next_turn()
         self.assertIn(self.first.token, self.game.submitted)
         self.game.place(self.second.token, last, 1, self.game.turn)
+        self.assertEqual(self.game.state, 'between_turns')
+        self.game.continue_turn(self.first.token, self.game.turn)
+        self.assertEqual(self.game.state, 'between_turns')
+        self.game.continue_turn(self.second.token, self.game.turn)
         self.assertEqual(self.game.state, 'finished')
         self.assertTrue(any(value is None for value in self.second.board.values()))
 
@@ -157,9 +310,25 @@ class GameTests(unittest.TestCase):
         self.assertEqual(analysis.group_cells, {(2, 0), (2, 1), (3, 0), (4, 4), (4, 5), (5, 5)})
         self.assertEqual(analysis.positive_skulls, {(0, 2)})
         self.assertEqual(analysis.negative_skulls, {(5, 0)})
-        overlay = score_overlay(analysis)
+        overlay = skull_overlay(analysis)
         self.assertIn('stroke="#dc2626"', overlay)
         self.assertEqual(overlay.count('<path '), 1)
+        self.assertNotIn('stroke="#dc2626"', score_overlay(analysis))
+
+    def test_scoring_lines_and_skull_crosses_use_separate_layers(self):
+        board = dict.fromkeys(POSITIONS)
+        board.update({(0, 2): SKULL, (2, 0): 1, (2, 1): 2})
+        analysis = analyze_board(board)
+        overlays = [MagicMock(), MagicMock()]
+        with patch('MathGame1.ui') as ui:
+            ui.html.side_effect = overlays
+            draw_board(board, None, analysis=analysis)
+            self.assertIn('stroke="#15803d"', ui.html.call_args_list[0].args[0])
+            self.assertNotIn('stroke="#dc2626"', ui.html.call_args_list[0].args[0])
+            self.assertIn('stroke="#dc2626"', ui.html.call_args_list[1].args[0])
+            self.assertNotIn('stroke="#15803d"', ui.html.call_args_list[1].args[0])
+            self.assertIn('z-10', overlays[0].classes.call_args.args[0])
+            self.assertIn('z-30', overlays[1].classes.call_args.args[0])
 
     def test_isolated_number_does_not_score_as_sequence(self):
         board = dict.fromkeys(POSITIONS)
@@ -168,12 +337,185 @@ class GameTests(unittest.TestCase):
         self.assertEqual(analysis.scores['secuencias'], 0)
         self.assertEqual(analysis.longest_sequence, [])
 
-    def test_sequence_overlay_marks_scoring_and_other_connections(self):
+    def test_sequence_overlay_only_shows_shorter_complete_paths_of_at_least_three(self):
         board = dict.fromkeys(POSITIONS)
-        board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3, (4, 0): 10, (5, 0): 11})
+        board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3, (2, 5): 4,
+                      (3, 0): 7, (4, 0): 8, (5, 0): 9,
+                      (4, 4): 12, (5, 5): 13})
+        overlay = score_overlay(analyze_board(board))
+        self.assertEqual(overlay.count('stroke="#15803d"'), 3)
+        self.assertEqual(overlay.count('stroke="#64748b"'), 2)
+        self.assertEqual(overlay.count('stroke-dasharray="12 8"'), 2)
+
+    def test_tied_longest_paths_are_not_shown_as_shorter_sequences(self):
+        board = dict.fromkeys(POSITIONS)
+        board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3,
+                      (3, 0): 7, (4, 0): 8, (5, 0): 9})
         overlay = score_overlay(analyze_board(board))
         self.assertEqual(overlay.count('stroke="#15803d"'), 2)
+        self.assertNotIn('stroke="#64748b"', overlay)
+
+    def test_short_branch_of_long_sequence_is_shown(self):
+        board = dict.fromkeys(POSITIONS)
+        board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3, (2, 5): 4, (1, 2): 3})
+        analysis = analyze_board(board)
+        self.assertIn(((0, 3), (1, 2)), analysis.shorter_sequence_edges)
+        self.assertIn(((0, 2), (0, 3)), analysis.shorter_sequence_edges)
+        overlay = score_overlay(analysis)
+        self.assertEqual(overlay.count('stroke="#15803d"'), 3)
         self.assertEqual(overlay.count('stroke="#64748b"'), 1)
+
+
+class GamePageTests(unittest.TestCase):
+    def test_completed_turn_shows_progress_and_waits_for_each_player(self):
+        game = Game('TEST')
+        ana = game.add_player('Ana')
+        luis = game.add_player('Luis')
+        game.state = 'between_turns'
+        game.roll = (2, 3, 4)
+        game.turn = 1
+        game.submitted.update((ana.token, luis.token))
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {ana.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board:
+            ui.refreshable.side_effect = refreshable
+            game_page(ana.token)
+            ui.linear_progress.assert_called_with(value=1, size='12px', show_value=False)
+            board.assert_not_called()
+            ui.label.assert_any_call('Turno completado. Pulsa para continuar.')
+            ui.button.call_args.kwargs['on_click']()
+            self.assertEqual(game.ready, {ana.token})
+            self.assertEqual(game.state, 'between_turns')
+            ui.label.assert_any_call('Esperando a que los demás jugadores continúen.')
+            ui.label.assert_any_call('Jugadores preparados: 1/2')
+
+    def test_skull_target_board_is_dark_and_progress_tracks_submissions(self):
+        game = Game('TEST')
+        ana = game.add_player('Ana')
+        luis = game.add_player('Luis')
+        game.state = 'playing'
+        game.roll = (2, 3, 6)
+        game.turn = 1
+        game.targets[ana.token] = luis.token
+        game.submitted.add(luis.token)
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {ana.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board:
+            ui.refreshable.side_effect = refreshable
+            game_page(ana.token)
+            ui.linear_progress.assert_called_with(value=0.5, size='12px', show_value=False)
+            self.assertIs(board.call_args.args[0], luis.board)
+            self.assertTrue(board.call_args.kwargs['skull_target'])
+
+    def test_results_rank_players_and_open_only_requested_board(self):
+        game = Game('TEST')
+        ana = game.add_player('Ana')
+        luis = game.add_player('Luis')
+        maria = game.add_player('María')
+        ana.board.update({(0, 2): 1, (0, 3): 2, (1, 4): 3})
+        maria.board.update({(0, 2): 4, (0, 3): 5, (1, 4): 6})
+        luis.board[(0, 2)] = SKULL
+        game.state = 'finished'
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {ana.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board:
+            ui.refreshable.side_effect = refreshable
+            game_page(ana.token)
+            labels = [call.args[0] for call in ui.label.call_args_list]
+            ranking = [label for label in labels if label.startswith(('1.', '3.'))]
+            self.assertEqual(ranking, [
+                '1. Ana: 3 puntos (secuencias 3, grupos 0, calaveras +0)',
+                '1. María: 3 puntos (secuencias 3, grupos 0, calaveras +0)',
+                '3. Luis: -2 puntos (secuencias 0, grupos 0, calaveras -2)',
+            ])
+            board.assert_not_called()
+            buttons = {call.args[0]: call.kwargs['on_click'] for call in ui.button.call_args_list}
+            buttons['Ver tablero de Luis'](None)
+            self.assertIs(board.call_args.args[0], luis.board)
+            buttons['Ver tablero de Ana'](None)
+            self.assertIs(board.call_args.args[0], ana.board)
+            self.assertEqual(ui.dialog.return_value.clear.call_count, 2)
+            self.assertEqual(ui.dialog.return_value.open.call_count, 2)
+
+    def test_number_selection_and_penalty(self):
+        game = Game('TEST')
+        player = game.add_player('Ana')
+        game.add_player('Luis')
+        game.state = 'playing'
+        game.roll = (2, 3, 4)
+        game.turn = 1
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {player.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board:
+            ui.refreshable.side_effect = refreshable
+            game_page(player.token)
+            calls = ui.button.call_args_list
+            self.assertEqual([call.args[0] for call in calls], [str(n) for n in range(1, 16)])
+            self.assertIsNone(board.call_args.args[1])
+
+            calls[1].kwargs['on_click'](None)
+            self.assertIsNotNone(board.call_args.args[1])
+            self.assertEqual(game.submitted, set())
+
+            invalid_click = ui.button.call_args_list[-1].kwargs['on_click']
+            with patch('MathGame1.RNG.choice', side_effect=lambda values: values[0]):
+                invalid_click(None)
+            self.assertIn(player.token, game.submitted)
+            self.assertEqual(sum(value is not None for value in player.board.values()), 1)
+            ui.notify.assert_called_once()
+
+            invalid_click(None)
+            self.assertEqual(sum(value is not None for value in player.board.values()), 1)
+
+    def test_heart_allows_all_numbers_and_selection_resets_next_turn(self):
+        game = Game('TEST')
+        player = game.add_player('Ana')
+        game.add_player('Luis')
+        game.state = 'playing'
+        game.roll = (2, 6, 4)
+        game.turn = 1
+
+        def refreshable(render):
+            wrapped = MagicMock(side_effect=render)
+            wrapped.refresh.side_effect = render
+            return wrapped
+
+        with patch.dict(TOKENS, {player.token: game}, clear=True), \
+                patch('MathGame1.ui') as ui, patch('MathGame1.draw_board') as board:
+            ui.refreshable.side_effect = refreshable
+            game_page(player.token)
+            ui.button.call_args_list[-1].kwargs['on_click'](None)
+            self.assertIsNotNone(board.call_args.args[1])
+            self.assertEqual(game.submitted, set())
+            position = next(pos for pos in POSITIONS if pos not in DOORS)
+            board.call_args.args[1](position)
+            self.assertEqual(player.board[position], 15)
+
+            game.submitted.clear()
+            game.turn += 1
+            game.revision += 1
+            ui.timer.call_args.args[1]()
+            self.assertIsNone(board.call_args.args[1])
 
 
 if __name__ == '__main__':
